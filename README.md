@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # InteraConstruction: AR Construction Site for Physical GO2 Robot
 
 ## Project Summary
@@ -56,4 +55,3 @@ We extend our gratitude to the original contributors for making their work avail
 =======
 # Unitree-Go2-Construction-Site-AR
 Unitree Go2 With Path-Planned Algorithm in a Unity Simulated Construction Environment
->>>>>>> 004d3eb8eed37478266b0456f9ae42069b8b60d6
