@@ -9,9 +9,6 @@ import math
 from enum import Enum
 from typing import Optional, Tuple
 
-# Note: You'll need to install the Unitree SDK
-# pip install unitree_sdk_python (or appropriate package)
-
 try:
     from unitree_sdk import Go2Robot, MotionCommand
     UNITREE_SDK_AVAILABLE = True
@@ -186,7 +183,7 @@ class SafetyMonitor:
         """Check if path is clear using robot sensors"""
         if self.controller.mode == RobotMode.REAL_ROBOT:
             # This would interface with actual proximity sensors
-            # For now, return True (safe) as placeholder
+            # TODO: Implement this later
             return True
         return True
     
@@ -203,7 +200,6 @@ class SafetyMonitor:
         return min(requested_speed, self.max_speed)
 
 
-# Example usage for real robot control
 if __name__ == "__main__":
     # Choose mode based on availability
     mode = RobotMode.REAL_ROBOT if UNITREE_SDK_AVAILABLE else RobotMode.SIMULATION
