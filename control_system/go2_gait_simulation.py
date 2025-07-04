@@ -123,8 +123,9 @@ class PathController:
         self.current_speed_mode = 0
         self.gaze_enabled = False
         self.was_stopped = False  # Track if robot was previously stopped
+        self.stop_start_time = None  # Track when stop period began
         
-    def get_speed(self, distance_traveled):
+    def get_speed(self, distance_traveled, current_time=None):
         """Calculate current speed based on mode and distance."""
         mode = self.speed_modes[self.current_speed_mode]
         
@@ -145,20 +146,36 @@ class PathController:
             return 3.0 if distance_traveled < 8.0 else 1.0
             
         elif mode == "1_stop_1":
-            # 1 m/s, stop at 8m, then 1 m/s after 8.5m
+            # 1 m/s, stop at 8m for 2 seconds, then 1 m/s
             if distance_traveled < 8.0:
                 return 1.0
-            elif distance_traveled < 8.5:
-                return 0.0  # Stop
+            elif distance_traveled >= 8.0:
+                # Start stop timer when we reach 8m
+                if self.stop_start_time is None:
+                    self.stop_start_time = current_time
+                
+                # Stop for 2 seconds, then resume
+                if current_time and (current_time - self.stop_start_time) < 2.0:
+                    return 0.0  # Stop for 2 seconds
+                else:
+                    return 1.0  # Resume
             else:
                 return 1.0
                 
         elif mode == "3_stop_3":
-            # 3 m/s, stop at 8m, then 3 m/s after 8.5m
+            # 3 m/s, stop at 8m for 2 seconds, then 3 m/s
             if distance_traveled < 8.0:
                 return 3.0
-            elif distance_traveled < 8.5:
-                return 0.0  # Stop
+            elif distance_traveled >= 8.0:
+                # Start stop timer when we reach 8m
+                if self.stop_start_time is None:
+                    self.stop_start_time = current_time
+                
+                # Stop for 2 seconds, then resume
+                if current_time and (current_time - self.stop_start_time) < 2.0:
+                    return 0.0  # Stop for 2 seconds
+                else:
+                    return 3.0  # Resume
             else:
                 return 3.0
                 
@@ -183,7 +200,7 @@ def main():
     end_pos = [0, 15, 0.4]  # 15m forward path
     
     try:
-        robot = Go2Robot("control_system/URDF/go2_description.urdf", start_pos)
+        robot = Go2Robot("/URDF/go2_description.urdf", start_pos)
     except p.error as e:
         print(f"Failed to load robot: {e}")
         p.disconnect()
@@ -236,6 +253,7 @@ def main():
                     start_time = current_time
                     initial_pos = robot.get_position()
                     path_controller.was_stopped = False  # Reset stop state when starting
+                    path_controller.stop_start_time = None  # Reset stop timer when starting
                 print(f"Walking: {'ON' if is_walking else 'OFF'}")
                 
             if ord('p') in keys and keys[ord('p')] & p.KEY_WAS_TRIGGERED:
@@ -271,6 +289,7 @@ def main():
                 is_walking = False
                 path_mode = 'leftward'  # Reset to starting mode
                 path_controller.was_stopped = False  # Reset stop state
+                path_controller.stop_start_time = None  # Reset stop timer
                 print("Robot Reset")
 
             if is_walking and start_time is not None:
@@ -286,7 +305,7 @@ def main():
                     distance_traveled = 0
                 
                 # Get current speed from path controller
-                target_speed = path_controller.get_speed(distance_traveled)
+                target_speed = path_controller.get_speed(distance_traveled, current_time)
                 gaze_angle = path_controller.get_gaze_angle(elapsed_time)
                 
                 # Handle stop/resume console output

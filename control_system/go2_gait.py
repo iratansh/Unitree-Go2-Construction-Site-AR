@@ -340,6 +340,7 @@ def main():
                     start_time = current_time
                     initial_pos = robot.get_position()
                     path_controller.was_stopped = False
+                    path_controller.stop_start_time = None  # Reset stop timer when starting
                     print(f"Walking: ON")
                 else:
                     robot.set_base_velocity([0, 0, 0], [0, 0, 0])
@@ -368,6 +369,7 @@ def main():
                 is_walking = False
                 path_mode = 'leftward'
                 path_controller.was_stopped = False
+                path_controller.stop_start_time = None  # Reset stop timer
                 print(" Robot Reset")
 
             # Main walking logic (matches simulation)
@@ -383,7 +385,7 @@ def main():
                     distance_traveled = 0
                 
                 # Get current speed from path controller
-                target_speed = path_controller.get_speed(distance_traveled)
+                target_speed = path_controller.get_speed(distance_traveled, current_time)
                 gaze_angle = path_controller.get_gaze_angle(elapsed_time)
                 
                 # Handle stop/resume console output
