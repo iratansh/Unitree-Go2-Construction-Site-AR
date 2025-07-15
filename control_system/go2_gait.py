@@ -26,7 +26,7 @@ from typing import List, Tuple, Optional
 try:
     from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
     from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeState_
-    from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeCmd_
+    from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeCmd_
     from unitree_sdk2py.utils.crc import CRC
     from unitree_sdk2py.utils.thread import Thread
 except ImportError as e:
@@ -247,7 +247,7 @@ class Go2WRobot:
         
         try:
             # Publishers for robot control
-            self.cmd_publisher = ChannelPublisher("rt/sportmodecommand", SportModeCmd_)
+            self.cmd_publisher = ChannelPublisher("rt/sportmodecommand", unitree_go_msg_dds__SportModeCmd_)
             self.cmd_publisher.Init()
             
             # Subscribers for robot state  
@@ -316,7 +316,7 @@ class Go2WRobot:
     
     def set_wheeled_stance(self):
         """Set robot to wheeled operation stance."""
-        cmd = SportModeCmd_()
+        cmd = unitree_go_msg_dds__SportModeCmd_()
         cmd.mode = 1  # Force stand mode
         
         cmd.euler = [0.0, 0.0, 0.0]
@@ -361,7 +361,7 @@ class Go2WRobot:
             vy_clamped = max(-max_linear, min(max_linear, self.current_vy))
             omega_clamped = max(-max_angular, min(max_angular, self.current_omega))
             
-            cmd = SportModeCmd_()
+            cmd = unitree_go_msg_dds__SportModeCmd_()
             cmd.mode = 2  # Velocity mode
             
             cmd.gait_type = 0
@@ -402,7 +402,7 @@ class Go2WRobot:
             interp_omega = initial_omega + smooth_progress * (target_omega - initial_omega)
             
             # Send command
-            cmd = SportModeCmd_()
+            cmd = unitree_go_msg_dds__SportModeCmd_()
             cmd.mode = 2
             cmd.velocity = [float(interp_vx), float(interp_vy), 0.0]
             cmd.yaw_speed = float(interp_omega)
