@@ -1,5 +1,5 @@
 """
-Go2W Real Robot Deployment Script - CORRECTED for Dual Mode Operation
+Go2W Real Robot Deployment Script 
 
 This script supports both wheeled mode (forward) and walking mode (lateral) just like the simulation.
 Go2W can walk laterally using legs while wheels are locked, similar to regular Go2.
