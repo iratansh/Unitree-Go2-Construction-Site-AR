@@ -6,4 +6,9 @@ dependencies:
   - pip
   - pip:
     - pybullet
-    - numpy 
+    - numpy
+    - pandas
+    - matplotlib
+    - opencv-python
+    - cyclonedx==0.10.2
+    - rich-click

@@ -375,8 +375,14 @@ class FixedPathController:
         return 15.0 * math.sin(0.5 * t)  # ±15 degrees
 
 def main():
-    # Setup
-    p.connect(p.GUI)
+    # Setup - use DIRECT mode for headless operation
+    try:
+        p.connect(p.GUI)
+        print("Running with GUI")
+    except:
+        print("GUI failed, running headless")
+        p.connect(p.DIRECT)
+    
     p.setAdditionalSearchPath(pybullet_data.getDataPath())
     p.setGravity(0, 0, -9.8)
     p.loadURDF("plane.urdf")
