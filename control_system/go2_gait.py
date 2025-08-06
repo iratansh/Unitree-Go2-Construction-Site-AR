@@ -14,7 +14,7 @@ Requirements:
 
 Usage:
     python3 go2w_deployment.py <network_interface>
-    Example: python3 go2w_deployment.py enp2s0
+    Example: python3 go2_gait.py wlo1 192.168.123.18
 """
 
 import sys
@@ -293,15 +293,17 @@ class Go2WRobot:
                 time.sleep(0.1)
                 
             if self.is_connected:
-                print("Go2W connection established!")
-                print("Robot will automatically use wheels for forward motion and crab walk for lateral motion")
+                print("✓ Go2W connection established!")
+                print("✓ Robot will automatically use wheels for forward motion and crab walk for lateral motion")
                 
                 # Stand up the robot
                 self.stand_up()
-                # Stand up the robot
-                self.stand_up()
             else:
-                print("Warning: Could not verify connection, but proceeding...")
+                print("❌ ERROR: Could not establish connection to Go2W robot!")
+                print(f"❌ Check network connection to {remote_ip}")
+                print("❌ Ensure robot is powered on and connected to network")
+                print("❌ Verify network interface '{network_interface}' is correct")
+                raise ConnectionError("Failed to connect to Go2W robot")
             
         except Exception as e:
             print(f"Failed to connect to Go2W: {e}")
@@ -346,14 +348,16 @@ class Go2WRobot:
     
     def stand_up(self):
         """Stand up the robot"""
-        print("Standing up robot...")
+        print("🤖 Standing up robot...")
         try:
             code = self.sport_client.StandUp()
             if code != 0:
-                print(f"Warning: StandUp returned code {code}")
+                print(f"⚠️  Warning: StandUp returned code {code}")
+            else:
+                print("✅ Robot standing up...")
             time.sleep(3.0)  # Wait for stand up to complete
         except Exception as e:
-            print(f"Error during stand up: {e}")
+            print(f"❌ Error during stand up: {e}")
     
     def set_velocity(self, vx: float, vy: float, omega: float):
         """
@@ -449,7 +453,7 @@ class Go2WRobot:
     
     def reset(self):
         """Reset tracking and stop movement"""
-        print("Resetting robot...")
+        print("🔄 Resetting robot position and state...")
         self.gradual_deceleration()
         
         # Reset velocities
@@ -461,11 +465,11 @@ class Go2WRobot:
         self.start_pos = self.current_position.copy()
         self.initial_yaw = self.current_yaw
         
-        print(f"New start position: {self.start_pos}")
+        print(f"✅ New start position: [{self.start_pos[0]:.2f}, {self.start_pos[1]:.2f}, {self.start_pos[2]:.2f}]")
     
     def emergency_stop(self):
         """Emergency stop - immediately halt all motion"""
-        print("EMERGENCY STOP!")
+        print("🚨 EMERGENCY STOP ACTIVATED!")
         self.current_vx = 0.0
         self.current_vy = 0.0
         self.current_omega = 0.0
@@ -517,31 +521,40 @@ def main():
         initial_pos = None
         last_status_time = time.time()
         
-        print("\n" + "="*60)
-        print("Go2W Robot - 15m Path Control (Dual Mode)")
-        print("="*60)
-        print("\nThe Go2W automatically selects movement mode:")
-        print("  • Forward motion → Uses wheels")
-        print("  • Lateral motion → Uses crab walk")
-        print("\nControls:")
-        print("  SPACE: Start/Stop Movement")
-        print("  P: Toggle Path Direction (forward/leftward)")
-        print("  S: Cycle Speed Profile")
-        print("  R: Reset Position")
-        print("  Ctrl+C: Emergency Stop")
-        print("\nPath Directions:")
-        print("  Forward: Move forward using wheels (with lateral correction)")
-        print("  Leftward: Move laterally using crab walk")
-        print("\nSpeed Profiles:")
+        print("\n" + "="*70)
+        print("           Go2W Robot - 15m Path Control (Dual Mode)")
+        print("="*70)
+        
+        print("\n🤖 Movement Modes:")
+        print("   • Forward motion → Uses wheels automatically")
+        print("   • Lateral motion → Uses crab walk automatically")
+        
+        print("\n🎮 Controls:")
+        print("   SPACE  : Start/Stop Movement")
+        print("   P      : Toggle Path Direction (forward/leftward)")
+        print("   S      : Cycle Speed Profile")
+        print("   R      : Reset Position")
+        print("   Ctrl+C : Emergency Stop")
+        
+        print("\n📍 Path Directions:")
+        print("   Forward  : Move forward using wheels (with lateral correction)")
+        print("   Leftward : Move laterally using crab walk")
+        
+        print("\n⚡ Speed Profiles:")
         for i, mode in enumerate(path_controller.speed_modes):
-            print(f"  {i}: {mode}")
-        print(f"\nPath Length: {path_controller.path_length}m")
-        print(f"Braking Distance: {path_controller.braking_distance}m")
-        print(f"Network: {network_interface}")
-        print(f"Broadcasting to: {remote_ip}:9051")
-        print("\nNOTE: If Go2W has regular tires (not omnidirectional), lateral")
-        print("      correction in forward mode will be disabled automatically.")
-        print("="*60 + "\n")
+            print(f"   {i}: {mode}")
+        
+        print(f"\n📏 Path Settings:")
+        print(f"   Length         : {path_controller.path_length}m")
+        print(f"   Braking Distance: {path_controller.braking_distance}m")
+        
+        print(f"\n🌐 Network:")
+        print(f"   Interface      : {network_interface}")
+        print(f"   Broadcasting to: {remote_ip}:9051")
+        
+        print("\n⚠️  NOTE: If Go2W has regular tires (not omnidirectional),")
+        print("          lateral correction in forward mode will be disabled.")
+        print("="*70)
         
         # Main control loop
         while True:
@@ -550,7 +563,7 @@ def main():
             # Check connection status
             if not robot.is_connected:
                 if is_walking:
-                    print("Robot disconnected! Stopping...")
+                    print("❌ Robot disconnected! Stopping movement...")
                     is_walking = False
                     robot.gradual_deceleration()
                 time.sleep(0.5)
@@ -571,28 +584,28 @@ def main():
                     initial_pos = robot.get_position()
                     path_controller.stop_start_time = None
                     path_controller.was_stopped = False
-                    print(f"Movement: ON ({path_mode} direction)")
+                    print(f"🚀 Movement Started: {path_mode} direction")
                 else:
                     robot.gradual_deceleration()
-                    print("Movement: OFF")
+                    print("⏹️  Movement Stopped")
                     
             if ord('p') in keys:
                 path_mode = 'leftward' if path_mode == 'forward' else 'forward'
-                print(f"Path Direction: {path_mode}")
+                print(f"📍 Path Direction Changed: {path_mode}")
                 if path_mode == 'forward':
-                    print("  → Will use wheels for forward motion")
+                    print("   → Will use wheels for forward motion")
                 else:
-                    print("  → Will use crab walk for lateral motion")
+                    print("   → Will use crab walk for lateral motion")
                 
             if ord('s') in keys:
                 path_controller.current_speed_mode = (path_controller.current_speed_mode + 1) % len(path_controller.speed_modes)
                 mode_name = path_controller.speed_modes[path_controller.current_speed_mode]
-                print(f"Speed Profile: {mode_name}")
+                print(f"⚡ Speed Profile Changed: {mode_name}")
                 
             if ord('r') in keys:
                 robot.reset()
                 is_walking = False
-                print("Position Reset")
+                print("🔄 Position Reset Complete")
 
             # Movement control
             if is_walking and start_time is not None:
@@ -626,10 +639,10 @@ def main():
                     else:
                         path_error = abs(current_pos[1] - initial_pos[1])  # Deviation from initial Y
                     
-                    status = f"Distance: {distance_traveled:.1f}m"
-                    status += f", Speed: {speed:.2f}/{target_speed:.2f}m/s"
-                    status += f", Path Error: {path_error:.3f}m"
-                    status += f", To Goal: {distance_to_goal:.1f}m"
+                    status = f"📊 Distance: {distance_traveled:.1f}m"
+                    status += f" | Speed: {speed:.2f}/{target_speed:.2f}m/s"
+                    status += f" | Path Error: {path_error:.3f}m"
+                    status += f" | To Goal: {distance_to_goal:.1f}m"
                     
                     print(status)
                     last_status_time = current_time
@@ -665,13 +678,13 @@ def main():
                 
                 # Check if path is complete
                 if distance_traveled >= path_controller.path_length:
-                    print(f"\n✓ Path complete! Total distance: {distance_traveled:.2f}m")
+                    print(f"\n🎯 Path Complete! Total distance: {distance_traveled:.2f}m")
                     if path_mode == 'forward':
                         final_error = abs(current_pos[0])
-                        print(f"  Final lateral error: {final_error:.3f}m")
+                        print(f"   Final lateral error: {final_error:.3f}m")
                     else:
                         final_error = abs(current_pos[1] - initial_pos[1])
-                        print(f"  Final forward error: {final_error:.3f}m")
+                        print(f"   Final forward error: {final_error:.3f}m")
                     
                     robot.gradual_deceleration()
                     is_walking = False
@@ -687,12 +700,12 @@ def main():
             time.sleep(0.02)  # 50Hz control loop
             
     except KeyboardInterrupt:
-        print("\n⚠ Emergency stop triggered!")
+        print("\n🛑 Emergency stop triggered!")
         if robot:
             robot.emergency_stop()
         
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n❌ Critical Error: {e}")
         import traceback
         traceback.print_exc()
         if robot:
@@ -701,10 +714,10 @@ def main():
     finally:
         if robot:
             robot.emergency_stop()
-            print("Robot safely stopped")
+            print("✅ Robot safely stopped")
         
         keyboard.stop()
-        print("Deployment ended")
+        print("🏁 Deployment ended")
 
 if __name__ == '__main__':
     main()
