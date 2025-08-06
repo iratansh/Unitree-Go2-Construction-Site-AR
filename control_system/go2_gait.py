@@ -1,11 +1,14 @@
 """
-Go2W Real Robot Deployment Script - CORRECTED for Dual Mode Operation
+Go2W Real Robot Deployment Script - Simplified Version
 
-This script supports both wheeled mode (forward) and walking mode (lateral) just like the simulation.
-Go2W can walk laterally using legs while wheels are locked, similar to regular Go2.
+The Go2W automatically handles movement modes:
+- Forward/backward motion: Uses wheels
+- Lateral motion: Uses crab walk (leg gaits)
+
+This is handled internally by the SportClient.Move() API.
 
 Requirements:
-- Go2W EDU with omnidirectional capabilities (wheels + legs)
+- Go2W EDU robot
 - Network configured (robot IP: 192.168.123.18)  
 - unitree_sdk2py properly installed
 
@@ -26,18 +29,17 @@ import numpy as np
 from typing import List, Tuple, Optional
 
 try:
-    # Try the primary import approach first
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize
     from unitree_sdk2py.go2.sport.sport_client import SportClient
     from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
     SDK_AVAILABLE = True
     print("Successfully imported Unitree SDK2 (Go2 SportClient)")
-except ImportError as e1:
-    print(f"Primary SDK import failed: {e1}") 
+except ImportError as e:
+    print(f"SDK import failed: {e}") 
     sys.exit(1)
 
 class SimplePathController:
-    """Simple path controller with both wheeled and walking modes"""
+    """Path controller with multiple speed profiles"""
     def __init__(self):
         self.path_length = 15.0
         self.braking_distance = 1.5
@@ -56,7 +58,7 @@ class SimplePathController:
         self.speed_smoothing = 0.85
         
     def get_speed(self, distance_traveled, current_time=None):
-        """Calculate current speed"""
+        """Calculate current speed based on selected profile"""
         mode = self.speed_modes[self.current_speed_mode]
         
         if mode == "1-3_gradual":
@@ -109,8 +111,10 @@ class SimplePathController:
         else:
             base_speed = 1.0
         
+        # Check if in programmed stop
         is_in_programmed_stop = (base_speed == 0.0 and 'stop' in mode and distance_traveled >= 8.0)
         
+        # Apply braking only if not in programmed stop
         if not is_in_programmed_stop:
             distance_to_goal = self.path_length - distance_traveled
             if distance_to_goal <= self.braking_distance and distance_to_goal > 0:
@@ -119,22 +123,23 @@ class SimplePathController:
             elif distance_to_goal <= 0:
                 base_speed = 0.0
         
+        # Smooth speed transitions
         smoothed_speed = self.speed_smoothing * self.last_speed + (1 - self.speed_smoothing) * base_speed
         self.last_speed = smoothed_speed
         
         return smoothed_speed
     
     def compute_forward_control(self, current_pos, current_yaw, target_speed):
-        """Forward control for wheeled mode"""
+        """Compute control for forward movement (uses wheels automatically)"""
         target_yaw = math.pi/2  # Face toward +Y direction
         
         is_in_stop_period = (target_speed < 0.05)
         
-        # Path correction for wheeled mode
-        path_error = current_pos[0] - 0.0
+        # Lateral correction to maintain straight path
+        path_error = current_pos[0] - 0.0  # Deviation from X=0
         
         if is_in_stop_period:
-            # Gentle lateral correction during stops
+            # Gentle correction during stops
             lateral_velocity = -path_error * 0.4
             lateral_velocity = np.clip(lateral_velocity, -0.3, 0.3)
             omega = 0.0
@@ -162,13 +167,13 @@ class SimplePathController:
         return forward_velocity, lateral_velocity, omega
     
     def get_gaze_angle(self, t):
-        """Calculate gaze angle if gaze mode is enabled."""
+        """Calculate gaze angle for lateral movement"""
         if not self.gaze_enabled:
             return 0.0
         return 15.0 * math.sin(0.5 * t)  # ±15 degrees
 
 class PoseBroadcaster:
-    """UDP broadcaster for digital twin synchronization."""
+    """UDP broadcaster for digital twin synchronization"""
     def __init__(self, target_ip: str, target_port: int):
         self.target_ip = target_ip
         self.target_port = target_port
@@ -176,7 +181,7 @@ class PoseBroadcaster:
         print(f"Pose broadcaster initialized for {self.target_ip}:{self.target_port}")
 
     def send_pose(self, position: List[float], yaw: float):
-        """Sends pose data (x, y, z, yaw) as comma-separated string."""
+        """Send pose data as comma-separated string"""
         try:
             pose_str = f"{position[0]},{position[1]},{position[2]},{yaw}"
             self.sock.sendto(pose_str.encode('utf-8'), (self.target_ip, self.target_port))
@@ -187,7 +192,7 @@ class PoseBroadcaster:
         self.sock.close()
 
 class KeyboardInput:
-    """Non-blocking keyboard input handler."""
+    """Non-blocking keyboard input handler"""
     
     def __init__(self):
         self.keys_pressed = set()
@@ -196,20 +201,20 @@ class KeyboardInput:
         self.old_settings = None
         
     def start(self):
-        """Start keyboard monitoring in separate thread."""
+        """Start keyboard monitoring in separate thread"""
         self.old_settings = termios.tcgetattr(sys.stdin)
         tty.setraw(sys.stdin.fileno()) 
         self.thread = threading.Thread(target=self._keyboard_listener, daemon=True)
         self.thread.start()
         
     def stop(self):
-        """Stop keyboard monitoring and restore terminal."""
+        """Stop keyboard monitoring and restore terminal"""
         self.running = False
         if self.old_settings:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
             
     def _keyboard_listener(self):
-        """Listen for keyboard events."""
+        """Listen for keyboard events"""
         while self.running:
             if select.select([sys.stdin], [], [], 0.1)[0]:
                 try:
@@ -231,25 +236,24 @@ class KeyboardInput:
                     continue
                     
     def get_keys(self):
-        """Get current key events."""
+        """Get current key events"""
         keys = self.key_events.copy()
         self.key_events.clear()
         return keys
 
 class Go2WRobot:
-    """Go2W robot interface supporting both wheeled and walking modes"""
+    """Simplified Go2W robot interface - leverages built-in movement modes"""
     
     def __init__(self, network_interface: str = "enp2s0", remote_ip: str = "192.168.123.18"):
         self.network_interface = network_interface
         self.start_pos = [0.0, 0.0, 0.35]
         self.initial_yaw = 0.0
         self.current_yaw = 0.0
-        self.mode = 'walking'  # Default to walking mode
         
         # Initialize UDP broadcaster
         self.pose_broadcaster = PoseBroadcaster(remote_ip, 9051)
         
-        # Initialize simple path controller
+        # Initialize path controller
         self.path_controller = SimplePathController()
         
         print(f"Connecting to Go2W via {network_interface}...")
@@ -258,30 +262,22 @@ class Go2WRobot:
             # Initialize channel factory with domain ID 0 for real robot
             ChannelFactoryInitialize(0, network_interface)
             
-            if SDK_AVAILABLE == True:
-                # Full SDK approach
-                print("Using full SportClient API...")
-                self.sport_client = SportClient()
-                self.sport_client.SetTimeout(10.0)
-                self.sport_client.Init()
-                
-                self.state_client = RobotStateClient()
-                self.state_client.SetTimeout(10.0)
-                self.state_client.Init()
-                
-                self.use_sport_client = True
-            else:
-                # Fallback DDS approach
-                print("Using fallback DDS approach...")
-                self.state_subscriber = ChannelSubscriber("rt/sportmodestate", unitree_go_msg_dds__SportModeState_)
-                self.state_subscriber.Init()
-                self.use_sport_client = False
+            # Initialize clients
+            print("Initializing SportClient and RobotStateClient...")
+            self.sport_client = SportClient()
+            self.sport_client.SetTimeout(10.0)
+            self.sport_client.Init()
+            
+            self.state_client = RobotStateClient()
+            self.state_client.SetTimeout(10.0)
+            self.state_client.Init()
             
             # Robot state
             self.current_position = [0.0, 0.0, 0.35]
             self.is_connected = False
             self.last_cmd_time = time.time()
             
+            # Velocity smoothing
             self.current_vx = 0.0
             self.current_vy = 0.0
             self.current_omega = 0.0
@@ -297,65 +293,40 @@ class Go2WRobot:
                 
             if self.is_connected:
                 print("Go2W connection established!")
-                print("Supporting both wheeled (forward) and walking (lateral) modes")
+                print("Robot will automatically use wheels for forward motion and crab walk for lateral motion")
                 
                 # Stand up the robot
                 self.stand_up()
             else:
-                print("Warning: Could not establish full connection, but proceeding...")
-                print("This may be normal for some SDK configurations.")
+                print("Warning: Could not verify connection, but proceeding...")
             
         except Exception as e:
             print(f"Failed to connect to Go2W: {e}")
             raise
     
     def _start_state_monitoring(self):
-        """Monitor robot state using available method."""
+        """Monitor robot state in background thread"""
         def monitor_state():
             while True:
                 try:
-                    if self.use_sport_client and hasattr(self, 'state_client'):
-                        # Use RobotStateClient
-                        code, state = self.state_client.GetRobotState()
-                        if code == 0 and state is not None:
-                            if hasattr(state, 'position'):
-                                self.current_position = [
-                                    state.position[0],
-                                    state.position[1], 
-                                    state.position[2] if len(state.position) > 2 else 0.35
-                                ]
-                            
-                            if hasattr(state, 'imu_state') and hasattr(state.imu_state, 'rpy'):
-                                self.current_yaw = state.imu_state.rpy[2]
-                            
-                            self.is_connected = True
-                            self.pose_broadcaster.send_pose(self.current_position, self.current_yaw)
-                        else:
-                            if self.is_connected:
-                                print(f"Lost SportClient connection (code: {code})")
-                                self.is_connected = False
-                    
-                    elif hasattr(self, 'state_subscriber'):
-                        # Fallback DDS subscriber approach
-                        msg = self.state_subscriber.Read()
-                        if msg:
-                            # Extract basic position info from SportModeState
-                            if hasattr(msg, 'position'):
-                                self.current_position = [
-                                    msg.position[0],
-                                    msg.position[1],
-                                    msg.position[2] if len(msg.position) > 2 else 0.35
-                                ]
-                            
-                            if hasattr(msg, 'imu_state') and hasattr(msg.imu_state, 'rpy'):
-                                self.current_yaw = msg.imu_state.rpy[2]
-                            
-                            self.is_connected = True
-                            self.pose_broadcaster.send_pose(self.current_position, self.current_yaw)
-                        else:
-                            if self.is_connected:
-                                print("Lost DDS connection")
-                                self.is_connected = False
+                    code, state = self.state_client.GetRobotState()
+                    if code == 0 and state is not None:
+                        if hasattr(state, 'position'):
+                            self.current_position = [
+                                state.position[0],
+                                state.position[1], 
+                                state.position[2] if len(state.position) > 2 else 0.35
+                            ]
+                        
+                        if hasattr(state, 'imu_state') and hasattr(state.imu_state, 'rpy'):
+                            self.current_yaw = state.imu_state.rpy[2]
+                        
+                        self.is_connected = True
+                        self.pose_broadcaster.send_pose(self.current_position, self.current_yaw)
+                    else:
+                        if self.is_connected:
+                            print(f"Lost connection (code: {code})")
+                            self.is_connected = False
                     
                     time.sleep(0.02)  # 50Hz
                 except Exception as e:
@@ -368,50 +339,30 @@ class Go2WRobot:
         self.monitor_thread = threading.Thread(target=monitor_state, daemon=True)
         self.monitor_thread.start()
     
-    def set_mode(self, mode):
-        """Switch between 'wheeled' and 'walking' modes."""
-        if mode == self.mode:
-            return
-            
-        print(f"Switching from {self.mode} to {mode} mode")
-        self.mode = mode
-        
-        # Note: The actual mode switching API calls would go here
-        # This depends on the specific Go2W high-level interface methods
-        # You may need to call specific functions to enable/disable wheels
-    
     def stand_up(self):
-        """Stand up the robot using available method."""
+        """Stand up the robot"""
         print("Standing up robot...")
         try:
-            if self.use_sport_client and hasattr(self, 'sport_client'):
-                code = self.sport_client.StandUp()
-                if code != 0:
-                    print(f"Warning: StandUp returned code {code}")
-            else:
-                print("Using fallback - manual stand up not available")
-                print("Please use robot controller to stand up manually")
+            code = self.sport_client.StandUp()
+            if code != 0:
+                print(f"Warning: StandUp returned code {code}")
             time.sleep(3.0)  # Wait for stand up to complete
         except Exception as e:
             print(f"Error during stand up: {e}")
     
-    def velocity_move_wheeled(self, vx: float, vy: float, omega: float):
+    def set_velocity(self, vx: float, vy: float, omega: float):
         """
-        Move robot in wheeled mode - CONSERVATIVE approach for regular tires
+        Set velocity - Go2W automatically handles movement mode:
+        - Forward/backward (vx): Uses wheels
+        - Lateral (vy): Uses crab walk
         
         Args:
             vx: Forward velocity in robot frame (m/s)
-            vy: Lateral velocity in robot frame (m/s) - MAY BE IGNORED if no omnidirectional wheels
+            vy: Lateral velocity in robot frame (m/s)
             omega: Angular velocity (rad/s)
         """
         try:
-            # CONSERVATIVE: If Go2W doesn't have omnidirectional wheels, ignore lateral velocity
-            if abs(vy) > 0.01:
-                print(f"WARNING: Lateral velocity {vy:.2f} in wheeled mode - may not work if Go2W has regular tires")
-                # Comment out the next line if Go2W has omnidirectional wheels
-                vy = 0.0  # Force to 0 for regular tire compatibility
-            
-            # Velocity smoothing
+            # Velocity smoothing for smoother motion
             if abs(vx) < 0.1 and abs(vy) < 0.1:  # Stopping
                 smoothing = 0.3
             else:  # Moving
@@ -421,75 +372,37 @@ class Go2WRobot:
             self.current_vy += smoothing * (vy - self.current_vy)
             self.current_omega += smoothing * (omega - self.current_omega)
             
-            # Conservative safety limits for Go2W
-            max_linear = 2.0  # Go2W max speed is 2.5 m/s, use conservative limit
+            # Safety limits
+            max_linear = 2.0  # Conservative limit for Go2W
             max_angular = 1.0
             
             # Clamp velocities
-            vx_clamped = max(-max_linear, min(max_linear, self.current_vx))
-            vy_clamped = max(-max_linear, min(max_linear, self.current_vy))
-            omega_clamped = max(-max_angular, min(max_angular, self.current_omega))
+            vx_clamped = np.clip(self.current_vx, -max_linear, max_linear)
+            vy_clamped = np.clip(self.current_vy, -max_linear, max_linear)
+            omega_clamped = np.clip(self.current_omega, -max_angular, max_angular)
             
-            # Try using available method for movement
-            if self.use_sport_client and hasattr(self, 'sport_client'):
-                code = self.sport_client.Move(vx_clamped, vy_clamped, omega_clamped)
-                if code != 0:
-                    print(f"Warning: Move command returned code {code}")
-            else:
-                print(f"Fallback: Would send velocity vx={vx_clamped:.2f}, vy={vy_clamped:.2f}, omega={omega_clamped:.2f}")
-                print("Manual control required - use robot controller for movement")
+            # Send velocity command - robot handles mode automatically
+            code = self.sport_client.Move(vx_clamped, vy_clamped, omega_clamped)
+            if code != 0:
+                print(f"Warning: Move command returned code {code}")
             
             self.last_cmd_time = time.time()
             
         except Exception as e:
-            print(f"Error sending wheeled velocity command: {e}")
-    
-    def velocity_move_walking(self, vx: float, vy: float, omega: float):
-        """
-        Move robot in walking mode (lateral movement via leg gaits)
-        
-        Args:
-            vx: Forward velocity in robot frame (m/s)
-            vy: Lateral velocity in robot frame (m/s)
-            omega: Angular velocity (rad/s)
-        """
-        try:
-            # For walking mode, use available method for velocity control
-            if self.use_sport_client and hasattr(self, 'sport_client'):
-                code = self.sport_client.Move(vx, vy, omega)
-                if code != 0:
-                    print(f"Warning: Walking Move command returned code {code}")
-            else:
-                print(f"Fallback: Would send walking velocity vx={vx:.2f}, vy={vy:.2f}, omega={omega:.2f}")
-                print("Manual control required - use robot controller for walking")
-            
-            self.last_cmd_time = time.time()
-            
-        except Exception as e:
-            print(f"Error sending walking velocity command: {e}")
-    
-    def set_velocity(self, vx: float, vy: float, omega: float):
-        """Set velocity based on current mode."""
-        if self.mode == 'wheeled':
-            self.velocity_move_wheeled(vx, vy, omega)
-        else:  # walking mode
-            self.velocity_move_walking(vx, vy, omega)
+            print(f"Error sending velocity command: {e}")
     
     def stop_move(self):
-        """Stop robot movement."""
+        """Stop robot movement"""
         try:
-            if self.use_sport_client and hasattr(self, 'sport_client'):
-                code = self.sport_client.StopMove()
-                if code != 0:
-                    print(f"Warning: StopMove returned code {code}")
-            else:
-                print("Fallback: Would send stop command")
+            code = self.sport_client.StopMove()
+            if code != 0:
+                print(f"Warning: StopMove returned code {code}")
         except Exception as e:
             print(f"Error stopping robot: {e}")
     
     def gradual_deceleration(self, target_vx: float = 0.0, target_vy: float = 0.0, 
                            target_omega: float = 0.0, duration: float = 0.6):
-        """Apply gradual deceleration."""
+        """Apply gradual deceleration for smooth stops"""
         start_time = time.time()
         initial_vx = self.current_vx
         initial_vy = self.current_vy
@@ -498,14 +411,14 @@ class Go2WRobot:
         while time.time() - start_time < duration:
             progress = (time.time() - start_time) / duration
             
-            # Smooth deceleration
+            # Smooth deceleration curve
             smooth_progress = (1 - math.cos(progress * math.pi)) / 2
             
             interp_vx = initial_vx + smooth_progress * (target_vx - initial_vx)
             interp_vy = initial_vy + smooth_progress * (target_vy - initial_vy)
             interp_omega = initial_omega + smooth_progress * (target_omega - initial_omega)
             
-            # Send command
+            # Send interpolated command
             self.set_velocity(interp_vx, interp_vy, interp_omega)
             
             time.sleep(0.02)  # 50Hz
@@ -519,15 +432,15 @@ class Go2WRobot:
         self.stop_move()
     
     def get_position(self):
-        """Get current position."""
+        """Get current position"""
         return self.current_position.copy()
     
     def get_position_and_orientation(self):
-        """Get current position and orientation."""
+        """Get current position and orientation"""
         return self.current_position.copy(), self.current_yaw
     
     def reset(self):
-        """Reset tracking and stop movement."""
+        """Reset tracking and stop movement"""
         print("Resetting robot...")
         self.gradual_deceleration()
         
@@ -543,25 +456,22 @@ class Go2WRobot:
         print(f"New start position: {self.start_pos}")
     
     def emergency_stop(self):
-        """Emergency stop."""
+        """Emergency stop - immediately halt all motion"""
         print("EMERGENCY STOP!")
         self.current_vx = 0.0
         self.current_vy = 0.0
         self.current_omega = 0.0
         
-        # Send stop commands repeatedly
+        # Send multiple stop commands for safety
         for _ in range(10):
             try:
-                if self.use_sport_client and hasattr(self, 'sport_client'):
-                    self.sport_client.StopMove()
-                else:
-                    print("Emergency stop - use robot controller!")
+                self.sport_client.StopMove()
                 time.sleep(0.01)
             except:
                 pass
     
     def __del__(self):
-        """Cleanup."""
+        """Cleanup on deletion"""
         try:
             self.emergency_stop()
             self.pose_broadcaster.close()
@@ -578,7 +488,7 @@ def main():
     network_interface = sys.argv[1]
     remote_ip = sys.argv[2] if len(sys.argv) == 3 else "192.168.123.18"
     
-    # Initialize
+    # Initialize components
     keyboard = KeyboardInput()
     robot = None
     
@@ -586,61 +496,61 @@ def main():
         print("Initializing Go2W robot...")
         robot = Go2WRobot(network_interface, remote_ip)
         
-        # Get path controller
+        # Get path controller reference
         path_controller = robot.path_controller
         
-        # Start keyboard
+        # Start keyboard input
         keyboard.start()
         
         # State variables
-        path_mode = 'leftward'  # Start in leftward (walking) mode
+        path_mode = 'leftward'  # Start with lateral movement
         is_walking = False
         start_time = None
         initial_pos = None
         last_status_time = time.time()
         
         print("\n" + "="*60)
-        print("Go2W Robot - 15m Path Control (Dual Mode)")
+        print("Go2W Robot - 15m Path Control")
         print("="*60)
-        print(f"SDK Status: {'Full SportClient' if robot.use_sport_client else 'Fallback DDS'}")
+        print("\nThe Go2W automatically selects movement mode:")
+        print("  • Forward motion → Uses wheels")
+        print("  • Lateral motion → Uses crab walk")
         print("\nControls:")
         print("  SPACE: Start/Stop Movement")
-        print("  P: Toggle Path Mode (forward/leftward)")
+        print("  P: Toggle Path Direction (forward/leftward)")
         print("  S: Cycle Speed Profile")
         print("  R: Reset Position")
         print("  Ctrl+C: Emergency Stop")
-        print("\nModes:")
-        print("  Forward: Wheeled mode - lateral correction may depend on wheel type")
-        print("  Leftward: Walking mode - GUARANTEED to work (leg-based lateral movement)")
+        print("\nPath Directions:")
+        print("  Forward: Move forward using wheels (with lateral correction)")
+        print("  Leftward: Move laterally using crab walk")
         print("\nSpeed Profiles:")
         for i, mode in enumerate(path_controller.speed_modes):
             print(f"  {i}: {mode}")
-        print(f"\nBraking: Last {path_controller.braking_distance}m")
+        print(f"\nPath Length: {path_controller.path_length}m")
+        print(f"Braking Distance: {path_controller.braking_distance}m")
         print(f"Network: {network_interface}")
         print(f"Broadcasting to: {remote_ip}:9051")
-        print("\nNOTE: If Go2W has regular tires (not omnidirectional), lateral")
-        print("      correction in forward mode will be disabled automatically.")
-        if not robot.use_sport_client:
-            print("\nWARNING: Using fallback mode - manual robot control may be required!")
         print("="*60 + "\n")
         
         # Main control loop
         while True:
             current_time = time.time()
             
-            # Check connection
+            # Check connection status
             if not robot.is_connected:
-                print("Robot disconnected! Waiting...")
-                is_walking = False
-                robot.gradual_deceleration()
-                time.sleep(1)
+                if is_walking:
+                    print("Robot disconnected! Stopping...")
+                    is_walking = False
+                    robot.gradual_deceleration()
+                time.sleep(0.5)
                 continue
             
-            # Maintain connection with heartbeat
+            # Send heartbeat to maintain connection
             if current_time - robot.last_cmd_time > 0.5:
                 robot.set_velocity(0.0, 0.0, 0.0)
             
-            # Handle keyboard
+            # Process keyboard input
             keys = keyboard.get_keys()
             
             if ord(' ') in keys:
@@ -650,21 +560,18 @@ def main():
                     initial_pos = robot.get_position()
                     path_controller.stop_start_time = None
                     path_controller.was_stopped = False
-                    print(f"Movement: ON ({path_mode} mode)")
+                    print(f"Movement: ON ({path_mode} direction)")
                 else:
                     robot.gradual_deceleration()
                     print("Movement: OFF")
                     
             if ord('p') in keys:
                 path_mode = 'leftward' if path_mode == 'forward' else 'forward'
-                
-                # Switch robot mode based on path mode
+                print(f"Path Direction: {path_mode}")
                 if path_mode == 'forward':
-                    robot.set_mode('wheeled')
-                    print("Path Mode: forward (wheeled mode)")
-                else:  # leftward
-                    robot.set_mode('walking')
-                    print("Path Mode: leftward (walking mode)")
+                    print("  → Will use wheels for forward motion")
+                else:
+                    print("  → Will use crab walk for lateral motion")
                 
             if ord('s') in keys:
                 path_controller.current_speed_mode = (path_controller.current_speed_mode + 1) % len(path_controller.speed_modes)
@@ -681,96 +588,107 @@ def main():
                 current_pos = robot.get_position()
                 elapsed_time = current_time - start_time
                 
-                # Calculate distance based on movement direction
+                # Calculate distance traveled
                 if initial_pos is not None:
                     if path_mode == 'forward':
+                        # Measure forward progress (Y direction)
                         distance_traveled = current_pos[1] - initial_pos[1]
                     else:  # leftward
-                        distance_traveled = current_pos[1] - initial_pos[1]  # Still measure forward progress
+                        # Measure lateral progress (X direction)
+                        distance_traveled = -(current_pos[0] - initial_pos[0])  # Negative because leftward is -X
                 else:
                     distance_traveled = 0
 
-                # Get target speed
+                # Get target speed from controller
                 target_speed = path_controller.get_speed(distance_traveled, current_time)
 
-                # Status output
+                # Periodic status output
                 is_stopped = (target_speed < 0.05)
                 
                 if current_time - last_status_time > 2.0 and not is_stopped:
                     speed = math.sqrt(robot.current_vx**2 + robot.current_vy**2)
                     distance_to_goal = path_controller.path_length - distance_traveled
-                    path_error = current_pos[0] - 0.0
                     
-                    status = f"Position: {distance_traveled:.1f}m"
+                    if path_mode == 'forward':
+                        path_error = abs(current_pos[0] - 0.0)  # Deviation from X=0
+                    else:
+                        path_error = abs(current_pos[1] - initial_pos[1])  # Deviation from initial Y
+                    
+                    status = f"Distance: {distance_traveled:.1f}m"
                     status += f", Speed: {speed:.2f}/{target_speed:.2f}m/s"
-                    status += f", Error: {abs(path_error):.3f}m"
-                    status += f", Mode: {robot.mode}"
+                    status += f", Path Error: {path_error:.3f}m"
+                    status += f", To Goal: {distance_to_goal:.1f}m"
                     
                     print(status)
                     last_status_time = current_time
                     
-                # Movement control based on path mode
+                # Generate control commands based on path direction
                 if path_mode == 'forward':
-                    # Forward mode using wheels with path correction
-                    # NOTE: Path correction (vy) may not work if Go2W has regular tires
+                    # Forward motion - robot will use wheels automatically
                     current_pos, current_yaw = robot.get_position_and_orientation()
                     
                     if target_speed > 0.05:
-                        # Use forward control with path correction
+                        # Compute forward control with path correction
                         vx, vy, omega = path_controller.compute_forward_control(
                             current_pos, current_yaw, target_speed
                         )
                     else:
-                        # Stopped - maintain position
+                        # Stopped - maintain position with gentle corrections
                         lateral_error = current_pos[0] - 0.0
                         vy = -lateral_error * 1.5
                         vy = np.clip(vy, -0.2, 0.2)
                         vx, omega = 0.0, 0.0
                     
-                    robot.set_velocity(vx, vy, omega)  # vy may be ignored in wheeled mode
+                    robot.set_velocity(vx, vy, omega)
                     
-                else:  # leftward mode using walking
-                    # Lateral movement via walking gaits (like regular Go2)
-                    # THIS WILL DEFINITELY WORK - uses leg gaits regardless of wheel type
-                    # Apply gaze control
+                else:  # leftward mode
+                    # Lateral motion - robot will use crab walk automatically
+                    # Apply optional gaze control
                     gaze_angle = path_controller.get_gaze_angle(elapsed_time)
                     gaze_rad = math.radians(gaze_angle)
                     angular_velocity = gaze_rad * 0.1  # Subtle gaze movement
                     
-                    # Move laterally (positive Y direction) using walking
-                    robot.set_velocity(0.0, target_speed, angular_velocity)
+                    # Move laterally (negative X is leftward)
+                    robot.set_velocity(0.0, -target_speed, angular_velocity)  # Negative for leftward
                 
-                # Check completion
+                # Check if path is complete
                 if distance_traveled >= path_controller.path_length:
-                    print(f"Path complete! Distance: {distance_traveled:.2f}m")
+                    print(f"\n✓ Path complete! Total distance: {distance_traveled:.2f}m")
                     if path_mode == 'forward':
-                        print(f"Final error: {abs(current_pos[0]):.3f}m")
+                        final_error = abs(current_pos[0])
+                        print(f"  Final lateral error: {final_error:.3f}m")
+                    else:
+                        final_error = abs(current_pos[1] - initial_pos[1])
+                        print(f"  Final forward error: {final_error:.3f}m")
+                    
                     robot.gradual_deceleration()
                     is_walking = False
                         
             else:
-                # Gradual stop
+                # Not walking - ensure robot is stopped
                 if (abs(robot.current_vx) > 0.01 or 
                     abs(robot.current_vy) > 0.01 or 
                     abs(robot.current_omega) > 0.01):
                     robot.set_velocity(0.0, 0.0, 0.0)
 
-            time.sleep(0.02)  # 50Hz
+            time.sleep(0.02)  # 50Hz control loop
             
     except KeyboardInterrupt:
-        print("\nEmergency stop!")
+        print("\n⚠ Emergency stop triggered!")
         if robot:
             robot.emergency_stop()
         
     except Exception as e:
-        print(f"\nError: {e}")
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         if robot:
             robot.emergency_stop()
         
     finally:
         if robot:
             robot.emergency_stop()
-            print("Robot stopped")
+            print("Robot safely stopped")
         
         keyboard.stop()
         print("Deployment ended")
