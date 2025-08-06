@@ -89,6 +89,96 @@ python3 go2_gait.py <your_network_interface>
 **Safety is critical.** Follow the on-screen warnings before proceeding.
 
 
+## Implementation Logic
+
+### Dual-Mode Robot Operation
+
+The system implements a sophisticated dual-mode control architecture that allows the Go2 robot to operate in two distinct movement modes:
+
+#### 1. Walking Mode (Lateral Movement)
+**Logic**: Uses the robot's natural quadruped gaits to move laterally while facing perpendicular to the path.
+- **Gait Generation**: Implements a procedural trot gait with diagonal leg pairs moving together
+- **Phase Control**: Uses sinusoidal functions with 180° phase offset between diagonal pairs (FR+RL vs FL+RR)
+- **Speed Adaptation**: Gait frequency and amplitude scale with target velocity for natural movement
+- **Leg Kinematics**: 
+  - Hip joints provide lateral steering oscillation
+  - Thigh joints control forward/backward leg swing
+  - Calf joints handle step height and ground clearance
+- **Base Velocity**: Robot body moves forward using PyBullet's `resetBaseVelocity` (simulation) or Unitree SDK's `VelocityMove` (real robot)
+
+#### 2. Wheeled Mode (Forward Movement)
+**Logic**: Utilizes omnidirectional wheels for precise forward movement with lateral path correction.
+- **Mecanum Kinematics**: Implements standard mecanum wheel equations for omnidirectional control
+- **Path Correction**: PID-style lateral error correction to maintain straight-line trajectory
+- **Velocity Smoothing**: Applies exponential smoothing to prevent jerky movements and oscillations
+- **Adaptive Control**: Reduces correction gains at higher speeds to prevent overcorrection
+
+### Speed Profile System
+
+The implementation includes four distinct speed profiles that demonstrate different robot behaviors:
+
+1. **Gradual Acceleration (1-3 m/s)**: Linear speed increase over the full path length
+2. **Gradual Deceleration (3-1 m/s)**: Linear speed decrease with enforced minimum of 1 m/s
+3. **Stop-and-Go Patterns**: Programmed stops at 8m mark with 2-second pause duration
+4. **Braking Zone**: Automatic deceleration in the final 1.5m using distance-based speed scaling
+
+**Smoothing Logic**: All speed transitions use exponential smoothing (α = 0.85) to ensure physical plausibility and reduce actuator stress.
+
+### Simulation-to-Reality Transfer
+
+#### Parity Design
+Both simulation and deployment scripts share identical control logic:
+- **Unified Path Controller**: Same speed calculation algorithms and state machines
+- **Consistent Timing**: Both systems operate at 50Hz control frequency
+- **Velocity Smoothing**: Identical smoothing parameters ensure consistent behavior
+- **Safety Constraints**: Same velocity limits and error checking
+
+#### Simulation-Specific Features (PyBullet)
+- **Physics Integration**: Uses PyBullet's built-in physics for realistic dynamics
+- **Joint Control**: Direct position/velocity control for individual leg joints
+- **Visual Debugging**: Real-time path visualization and distance markers
+- **URDF Loading**: Loads robot model from standardized URDF description
+
+#### Deployment-Specific Features (Real Robot)
+- **SDK Integration**: Uses Unitree's high-level interface for robust communication
+- **Network Handling**: DDS communication over Ethernet with automatic reconnection
+- **State Monitoring**: Continuous IMU and position feedback at 50Hz
+- **Safety Systems**: Emergency stop, gradual deceleration, and connection monitoring
+- **Digital Twin Sync**: UDP broadcasting of robot pose for external visualization
+
+### Gaze Control System
+
+**Logic**: Implements human-like attention patterns during movement.
+- **Sinusoidal Pattern**: ±15° head turning using `sin(0.5 * t)` for natural rhythm
+- **Speed Independence**: Gaze timing remains constant regardless of movement speed
+- **Mode Integration**: Applies as angular velocity offset in both walking and wheeled modes
+
+### Path Following Architecture
+
+#### Walking Mode Path Following
+```
+Target Direction: +Y axis (forward)
+Robot Orientation: 0° (perpendicular to path)
+Movement Vector: [0, target_speed, gaze_omega]
+```
+
+#### Wheeled Mode Path Following
+```
+Path Error: current_x - target_x (0.0)
+Lateral Correction: -error * gain (adaptive)
+Heading Control: target_yaw (90°) - current_yaw
+Control Vector: [forward_speed, lateral_correction, yaw_correction]
+```
+
+### Error Handling and Robustness
+
+- **Connection Monitoring**: Continuous health checking with automatic reconnection
+- **Velocity Limiting**: Hard limits prevent dangerous speeds or accelerations
+- **Gradual Transitions**: All mode switches include smooth velocity interpolation
+- **Emergency Protocols**: Multi-level stop systems from gentle deceleration to immediate halt
+
+This architecture ensures that behaviors tested in simulation translate reliably to the physical robot, while maintaining safety and robustness in real-world deployment.
+
 ## Acknowledgements
 
 The base environment for this project is adapted from the open-source **InteraConstruction** simulator, a Unity 3D simulation game developed to provide a realistic construction site setting.

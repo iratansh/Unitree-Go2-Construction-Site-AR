@@ -249,6 +249,7 @@ class Go2WRobot:
         self.start_pos = [0.0, 0.0, 0.35]
         self.initial_yaw = 0.0
         self.current_yaw = 0.0
+        self.mode = 'walking'  # Default to walking mode
         
         # Initialize UDP broadcaster
         self.pose_broadcaster = PoseBroadcaster(remote_ip, 9051)
@@ -297,6 +298,8 @@ class Go2WRobot:
                 
                 # Stand up the robot
                 self.stand_up()
+                # Stand up the robot
+                self.stand_up()
             else:
                 print("Warning: Could not verify connection, but proceeding...")
             
@@ -332,7 +335,9 @@ class Go2WRobot:
                 except Exception as e:
                     if self.is_connected:
                         print(f"State monitoring error: {e}")
+                        print(f"State monitoring error: {e}")
                         self.is_connected = False
+                    time.sleep(0.1)
                     time.sleep(0.1)
                     continue
                     
@@ -358,7 +363,7 @@ class Go2WRobot:
         
         Args:
             vx: Forward velocity in robot frame (m/s)
-            vy: Lateral velocity in robot frame (m/s)
+            vy: Lateral velocity in robot frame (m/s) - MAY BE IGNORED if no omnidirectional wheels
             omega: Angular velocity (rad/s)
         """
         try:
@@ -427,6 +432,9 @@ class Go2WRobot:
         self.current_vx = target_vx
         self.current_vy = target_vy
         self.current_omega = target_omega
+        
+        # Final stop
+        self.stop_move()
         
         # Final stop
         self.stop_move()
@@ -510,7 +518,7 @@ def main():
         last_status_time = time.time()
         
         print("\n" + "="*60)
-        print("Go2W Robot - 15m Path Control")
+        print("Go2W Robot - 15m Path Control (Dual Mode)")
         print("="*60)
         print("\nThe Go2W automatically selects movement mode:")
         print("  • Forward motion → Uses wheels")
@@ -531,6 +539,8 @@ def main():
         print(f"Braking Distance: {path_controller.braking_distance}m")
         print(f"Network: {network_interface}")
         print(f"Broadcasting to: {remote_ip}:9051")
+        print("\nNOTE: If Go2W has regular tires (not omnidirectional), lateral")
+        print("      correction in forward mode will be disabled automatically.")
         print("="*60 + "\n")
         
         # Main control loop
@@ -548,6 +558,7 @@ def main():
             
             # Send heartbeat to maintain connection
             if current_time - robot.last_cmd_time > 0.5:
+                robot.set_velocity(0.0, 0.0, 0.0)
                 robot.set_velocity(0.0, 0.0, 0.0)
             
             # Process keyboard input
@@ -586,6 +597,7 @@ def main():
             # Movement control
             if is_walking and start_time is not None:
                 current_pos = robot.get_position()
+                elapsed_time = current_time - start_time
                 elapsed_time = current_time - start_time
                 
                 # Calculate distance traveled
@@ -669,6 +681,7 @@ def main():
                 if (abs(robot.current_vx) > 0.01 or 
                     abs(robot.current_vy) > 0.01 or 
                     abs(robot.current_omega) > 0.01):
+                    robot.set_velocity(0.0, 0.0, 0.0)
                     robot.set_velocity(0.0, 0.0, 0.0)
 
             time.sleep(0.02)  # 50Hz control loop
