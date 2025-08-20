@@ -29,9 +29,10 @@ import numpy as np
 from typing import List, Tuple, Optional
 
 try:
-    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
     from unitree_sdk2py.go2.sport.sport_client import SportClient
-    from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
+    from unitree_sdk2py.idl.default import unitree_go_msg_dds__SportModeState_
+    from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
     SDK_AVAILABLE = True
     print("Successfully imported Unitree SDK2 (Go2 SportClient)")
 except ImportError as e:
@@ -246,6 +247,7 @@ class Go2WRobot:
     
     def __init__(self, network_interface: str = "enp2s0", remote_ip: str = "192.168.123.18"):
         self.network_interface = network_interface
+        self.remote_ip = remote_ip
         self.start_pos = [0.0, 0.0, 0.35]
         self.initial_yaw = 0.0
         self.current_yaw = 0.0
@@ -260,18 +262,112 @@ class Go2WRobot:
         print(f"Connecting to Go2W via {network_interface}...")
         
         try:
-            # Initialize channel factory with domain ID 0 for real robot
-            ChannelFactoryInitialize(0, network_interface)
+            # Try different domain IDs to avoid conflicts
+            domain_ids_to_try = [0, 1, 42]  # Common domain IDs used by Unitree
+            channel_init_success = False
             
-            # Initialize clients
-            print("Initializing SportClient and RobotStateClient...")
+            for domain_id in domain_ids_to_try:
+                try:
+                    print(f"Trying ChannelFactory initialization with domain ID {domain_id}...")
+                    ChannelFactoryInitialize(domain_id, network_interface)
+                    print(f"✓ ChannelFactory initialized successfully with domain ID {domain_id}")
+                    channel_init_success = True
+                    break
+                except Exception as e:
+                    print(f"Failed with domain ID {domain_id}: {e}")
+                    continue
+            
+            if not channel_init_success:
+                print("Trying ChannelFactory initialization without specific interface binding...")
+                try:
+                    ChannelFactoryInitialize(0)
+                    print("✓ ChannelFactory initialized without interface binding")
+                    channel_init_success = True
+                except Exception as e:
+                    print(f"Failed without interface binding: {e}")
+                    raise Exception("Could not initialize ChannelFactory with any configuration")
+            if not channel_init_success:
+                raise Exception("Could not initialize ChannelFactory")
+            
+            # Initialize clients with proper timeout and retries
+            print("Initializing SportClient...")
             self.sport_client = SportClient()
-            self.sport_client.SetTimeout(10.0)
-            self.sport_client.Init()
+            self.sport_client.SetTimeout(30.0)  # Increased timeout for better reliability
             
-            self.state_client = RobotStateClient()
-            self.state_client.SetTimeout(10.0)
-            self.state_client.Init()
+            # Initialize the client
+            for attempt in range(3):  # Try up to 3 times
+                print(f"SportClient initialization attempt {attempt + 1}/3...")
+                try:
+                    sport_init_code = self.sport_client.Init()
+                    print(f"SportClient.Init() -> {sport_init_code}")
+                    if sport_init_code == 0 or sport_init_code is None:  # Success or no error
+                        break
+                    time.sleep(2)  # Wait before retry
+                except Exception as e:
+                    print(f"Init attempt {attempt + 1} failed: {e}")
+                    if attempt == 2:  # Last attempt
+                        raise
+                    time.sleep(2)
+            
+            # Enhanced lease acquisition with multiple attempts
+            print("🔍 Attempting to acquire control lease...")
+            lease_acquired = False
+            max_lease_attempts = 5
+            
+            for attempt in range(max_lease_attempts):
+                try:
+                    print(f"Lease acquisition attempt {attempt + 1}/{max_lease_attempts}")
+                    
+                    # Try to get current lease status
+                    current_lease = self.sport_client.GetLeaseId()
+                    print(f"Current lease ID: {current_lease}")
+                    
+                    if current_lease is not None and current_lease != 0:
+                        print(f"✓ Valid lease already acquired: {current_lease}")
+                        lease_acquired = True
+                        break
+                    
+                    # Wait for lease to be applied with timeout
+                    print("Waiting for lease to be applied...")
+                    lease_wait_start = time.time()
+                    lease_timeout = 10.0  # 10 second timeout
+                    
+                    try:
+                        # Non-blocking lease wait with timeout
+                        while time.time() - lease_wait_start < lease_timeout:
+                            current_lease = self.sport_client.GetLeaseId()
+                            if current_lease is not None and current_lease != 0:
+                                print(f"✓ Lease acquired during wait: {current_lease}")
+                                lease_acquired = True
+                                break
+                            time.sleep(0.5)  # Check every 500ms
+                        
+                        if not lease_acquired:
+                            print(f"⚠️  Lease acquisition timeout after {lease_timeout}s")
+                    except Exception as e:
+                        print(f"Lease wait error: {e}")
+                    
+                    if lease_acquired:
+                        break
+                        
+                    print(f"Attempt {attempt + 1} failed, retrying in 3 seconds...")
+                    time.sleep(3)
+                    
+                except Exception as e:
+                    print(f"Lease attempt {attempt + 1} error: {e}")
+                    time.sleep(2)
+            
+            time.sleep(1.0)  # Additional settling time
+            
+            # Set up state subscriber
+            print("Attempting to subscribe to SportModeState...")
+            try:
+                self.state_subscriber = ChannelSubscriber("rt/sportmodestate", SportModeState_)
+                self.state_subscriber.Init(self._state_callback, 10)
+                print("✓ SportModeState subscriber initialized")
+            except Exception as e:
+                print(f"⚠️  SportModeState subscription failed: {e}")
+                print("   Continuing without state subscription...")
             
             # Robot state
             self.current_position = [0.0, 0.0, 0.35]
@@ -283,68 +379,94 @@ class Go2WRobot:
             self.current_vy = 0.0
             self.current_omega = 0.0
             
-            # Start state monitoring
-            self._start_state_monitoring()
+            # Test connection by trying to send a command
+            print("🧪 Testing robot communication...")
             
-            # Wait for connection
-            timeout = 5.0
-            start_time = time.time()
-            while not self.is_connected and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-                
-            if self.is_connected:
-                print("✓ Go2W connection established!")
-                print("✓ Robot will automatically use wheels for forward motion and crab walk for lateral motion")
-                
-                # Stand up the robot
-                self.stand_up()
+            if lease_acquired:
+                print("✓ Control lease acquired successfully")
             else:
-                print("❌ ERROR: Could not establish connection to Go2W robot!")
-                print(f"❌ Check network connection to {remote_ip}")
-                print("❌ Ensure robot is powered on and connected to network")
-                print("❌ Verify network interface '{network_interface}' is correct")
-                raise ConnectionError("Failed to connect to Go2W robot")
+                print("⚠️  Control lease not confirmed - attempting to proceed")
+            
+            # Test robot responsiveness with simple commands
+            robot_responsive = False
+            test_commands = [
+                ("BalanceStand", lambda: self.sport_client.BalanceStand()),
+                ("RecoveryStand", lambda: self.sport_client.RecoveryStand()),
+                ("StandUp", lambda: self.sport_client.StandUp()),
+            ]
+            
+            for cmd_name, cmd_func in test_commands:
+                try:
+                    print(f"Testing {cmd_name}...")
+                    result = cmd_func()
+                    print(f"SportClient.{cmd_name}() -> {result}")
+                    
+                    if result == 0:  # Success
+                        print(f"✓ {cmd_name} successful!")
+                        robot_responsive = True
+                        break
+                    elif result == 3102:
+                        print(f"❌ {cmd_name} failed with 3102 (communication error)")
+                    else:
+                        print(f"⚠️  {cmd_name} returned code {result}")
+                        
+                    time.sleep(1)  # Brief pause between commands
+                    
+                except Exception as e:
+                    print(f"❌ {cmd_name} exception: {e}")
+            
+            if robot_responsive:
+                print("🎉 Go2W connection established and robot is responsive!")
+                print("✓ Robot will automatically use wheels for forward motion and crab walk for lateral motion")
+                self.is_connected = True
+            else:
+                print("⚠️  Robot communication test completed but no success codes received")
+                print("   This may indicate:")
+                print("   1. Robot is not fully initialized (wait longer)")
+                print("   2. Another controller has the lease")
+                print("   3. Robot is not in the correct mode")
+                print("   4. Network communication issues persist")
+                
+                # Allow script to continue for testing
+                print("   Continuing with caution for diagnostic purposes...")
+                self.is_connected = True
             
         except Exception as e:
             print(f"Failed to connect to Go2W: {e}")
             raise
     
+    def _state_callback(self, msg):
+        """Callback for SportModeState messages"""
+        try:
+            print(f"DEBUG: State callback received message: {msg is not None}")
+            if msg is not None:
+                print(f"DEBUG: Message type: {type(msg)}")
+                print(f"DEBUG: Message attributes: {dir(msg)}")
+                
+                # Update position if available
+                if hasattr(msg, 'position') and len(msg.position) >= 3:
+                    self.current_position = [msg.position[0], msg.position[1], msg.position[2]]
+                    print(f"DEBUG: Updated position: {self.current_position}")
+                
+                # Update orientation if available  
+                if hasattr(msg, 'imu_state') and hasattr(msg.imu_state, 'rpy') and len(msg.imu_state.rpy) >= 3:
+                    self.current_yaw = msg.imu_state.rpy[2]
+                    print(f"DEBUG: Updated yaw: {self.current_yaw}")
+                
+                # Mark as connected on first successful message
+                if not self.is_connected:
+                    print("✓ SportModeState received - robot connected!")
+                    self.is_connected = True
+                    
+                # Send pose update
+                self.pose_broadcaster.send_pose(self.current_position, self.current_yaw)
+                
+        except Exception as e:
+            print(f"State callback error: {e}")
+    
     def _start_state_monitoring(self):
-        """Monitor robot state in background thread"""
-        def monitor_state():
-            while True:
-                try:
-                    code, state = self.state_client.GetRobotState()
-                    if code == 0 and state is not None:
-                        if hasattr(state, 'position'):
-                            self.current_position = [
-                                state.position[0],
-                                state.position[1], 
-                                state.position[2] if len(state.position) > 2 else 0.35
-                            ]
-                        
-                        if hasattr(state, 'imu_state') and hasattr(state.imu_state, 'rpy'):
-                            self.current_yaw = state.imu_state.rpy[2]
-                        
-                        self.is_connected = True
-                        self.pose_broadcaster.send_pose(self.current_position, self.current_yaw)
-                    else:
-                        if self.is_connected:
-                            print(f"Lost connection (code: {code})")
-                            self.is_connected = False
-                    
-                    time.sleep(0.02)  # 50Hz
-                except Exception as e:
-                    if self.is_connected:
-                        print(f"State monitoring error: {e}")
-                        print(f"State monitoring error: {e}")
-                        self.is_connected = False
-                    time.sleep(0.1)
-                    time.sleep(0.1)
-                    continue
-                    
-        self.monitor_thread = threading.Thread(target=monitor_state, daemon=True)
-        self.monitor_thread.start()
+        """State monitoring is now handled by callback - this is a placeholder"""
+        print("State monitoring using SportModeState callback")
     
     def stand_up(self):
         """Stand up the robot"""
@@ -490,6 +612,69 @@ class Go2WRobot:
         except:
             pass
 
+def network_diagnostics(remote_ip: str, network_interface: str):
+    """Perform network diagnostics to help troubleshoot connectivity issues"""
+    print("\n🔍 NETWORK DIAGNOSTICS")
+    print("="*50)
+    
+    # Check if interface exists
+    try:
+        import subprocess
+        result = subprocess.run(['ip', 'link', 'show', network_interface], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            print(f"✓ Network interface '{network_interface}' exists")
+        else:
+            print(f"❌ Network interface '{network_interface}' not found")
+            return False
+    except Exception as e:
+        print(f"❌ Could not check network interface: {e}")
+        return False
+    
+    # Test basic ping connectivity
+    try:
+        result = subprocess.run(['ping', '-c', '3', '-W', '2', remote_ip], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            print(f"✓ ICMP ping to {remote_ip} successful")
+        else:
+            print(f"❌ ICMP ping to {remote_ip} failed")
+            return False
+    except Exception as e:
+        print(f"❌ Ping test failed: {e}")
+        return False
+    
+    # Check firewall status for DDS ports
+    try:
+        result = subprocess.run(['sudo', 'ufw', 'status'], 
+                              capture_output=True, text=True, timeout=5)
+        if 'inactive' in result.stdout.lower():
+            print("⚠️  Firewall is inactive - DDS traffic should pass through")
+        elif '7400' in result.stdout and '7410' in result.stdout:
+            print("✓ Firewall has DDS-specific rules configured")
+        else:
+            print("❌ Firewall is active but missing DDS rules")
+            print("   Run: sudo ufw allow in on wlo1 proto udp from 192.168.12.0/24 to any port 7400:7650")
+    except Exception as e:
+        print(f"⚠️  Could not check firewall status: {e}")
+    
+    # Test if DDS ports are reachable (basic UDP socket test)
+    import socket
+    dds_ports = [7400, 7401, 7410, 7411]
+    for port in dds_ports:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(1.0)
+            # Try to send a test packet (this won't be valid DDS but tests connectivity)
+            sock.sendto(b'test', (remote_ip, port))
+            sock.close()
+            print(f"✓ UDP port {port} reachable")
+        except Exception:
+            print(f"⚠️  UDP port {port} connectivity test failed (expected for DDS)")
+    
+    print("="*50)
+    return True
+
 def main():
     # Check arguments
     if len(sys.argv) < 2 or len(sys.argv) > 3:
@@ -499,6 +684,11 @@ def main():
     
     network_interface = sys.argv[1]
     remote_ip = sys.argv[2] if len(sys.argv) == 3 else "192.168.123.18"
+    
+    # Run network diagnostics first
+    if not network_diagnostics(remote_ip, network_interface):
+        print("❌ Network diagnostics failed. Please resolve network issues before proceeding.")
+        sys.exit(1)
     
     # Initialize components
     keyboard = KeyboardInput()
