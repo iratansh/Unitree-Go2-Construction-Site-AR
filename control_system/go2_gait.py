@@ -116,14 +116,14 @@ class Go2EthernetControl:
         self.current_vy += smoothing * (vy - self.current_vy)
         self.current_omega += smoothing * (omega - self.current_omega)
         
-        # Use the ACTUAL input velocities, not the smoothed ones
+        # Use the input velocities, not the smoothed ones
         vx_clamped = np.clip(vx, -3.0, 3.0)  # Forward/backward limits
-        vy_clamped = np.clip(vy, -1.5, 1.5)  # Lateral movement typically has lower limits
+        vy_clamped = np.clip(vy, -0.50, 0.50)  # Allow up to 0.5m/s lateral to test Go2w's actual limits
         omega_clamped = np.clip(omega, -1.5, 1.5)  # Rotation limits
         
         # Debug when lateral speeds are being limited
-        if abs(vy) > 1.5 and abs(vy_clamped) <= 1.5:
-            print(f"\n[LATERAL_LIMIT] Requested vy={vy:.2f} clamped to {vy_clamped:.2f}")
+        if abs(vy) > 0.50 and abs(vy_clamped) <= 0.50:
+            print(f"\n[LATERAL_LIMIT] Requested vy={vy:.2f} clamped to {vy_clamped:.2f} (testing Go2w limits)")
         
         # Send stop command if all velocities are zero
         if abs(vx_clamped) < 0.01 and abs(vy_clamped) < 0.01 and abs(omega_clamped) < 0.01:
@@ -180,7 +180,7 @@ class SimplePathController:
     """Path controller with multiple speed profiles"""
     def __init__(self):
         self.path_length = 15.0
-        self.braking_distance = 1.5
+        self.braking_distance = 2.5  # Increased braking distance so robot reaches full speed earlier
         self.speed_modes = [
             "0.5-3.0_gradual",  # 0.5m/s to 3.0m/s gradual increase 
             "3.0-0.5_gradual",  # 3.0m/s to 0.5m/s gradual decrease  
@@ -192,23 +192,46 @@ class SimplePathController:
         self.was_stopped = False
         self.stop_start_time = None
         self.last_speed = 0.0
-        self.speed_smoothing = 0.85
+        self.speed_smoothing = 0.65  # Less smoothing for more responsive speed changes
         
-    def get_speed(self, distance_traveled, current_time=None):
-        """Calculate current speed based on selected profile"""
+        # Different max speeds for different movement modes
+        self.max_speed_forward = 3.0  # Full speed for forward movement
+        self.max_speed_lateral = 0.50  # Allow testing up to 0.5m/s for lateral movement
+        
+    def get_speed(self, distance_traveled, current_time=None, movement_mode='forward'):
+        """Calculate current speed based on selected profile and movement mode"""
         mode = self.speed_modes[self.current_speed_mode]
         
+        # Get the appropriate max speed for this movement mode
+        max_speed = self.max_speed_forward if movement_mode == 'forward' else self.max_speed_lateral
+        
         if mode == "0.5-3.0_gradual":
-            progress = min(1.0, distance_traveled / self.path_length)
-            base_speed = 0.5 + progress * 2.5  # 0.5 to 3.0 m/s
+            if movement_mode == 'leftward':
+                # For leftward, use steeper acceleration curve to reach max speed by 10m
+                acceleration_distance = 10.0  # Reach max speed by 10m instead of 15m
+                progress = min(1.0, distance_traveled / acceleration_distance)
+                min_start_speed = 0.15  # Start higher to ensure proper crabwalk engagement
+                base_speed = min_start_speed + progress * (max_speed - min_start_speed)
+            else:
+                # For forward mode, keep original logic: 0.5 to max_speed over full path
+                progress = min(1.0, distance_traveled / self.path_length)
+                base_speed = 0.5 + progress * (max_speed - 0.5)
             
         elif mode == "3.0-0.5_gradual":
             progress = min(1.0, distance_traveled / self.path_length)
-            base_speed = max(0.5, 3.0 - progress * 2.5)  # 3.0 to 0.5 m/s
+            if movement_mode == 'leftward':
+                # For leftward, start at max_speed and gradually decrease to reasonable minimum
+                min_end_speed = 0.15  # End at reasonable speed to maintain crabwalk
+                base_speed = max(min_end_speed, max_speed - progress * (max_speed - min_end_speed))
+            else:
+                # For forward mode, keep original logic: max_speed down to 0.5
+                base_speed = max(0.5, max_speed - progress * (max_speed - 0.5))
             
         elif mode == "1.0_stop_1.0":
+            # Scale 1.0 to appropriate speed for movement mode
+            target_speed = min(1.0, max_speed)
             if distance_traveled < 8.0:
-                base_speed = 1.0
+                base_speed = target_speed
             elif distance_traveled >= 8.0 and distance_traveled < 10.0:  # Stop only in 8-10m range
                 if self.stop_start_time is None:
                     self.stop_start_time = current_time
@@ -222,13 +245,15 @@ class SimplePathController:
                     if self.was_stopped:
                         print(f"\nRobot RESUMED at {distance_traveled:.1f}m")
                         self.was_stopped = False
-                    base_speed = 1.0
-            else:  # distance_traveled >= 10.0 - continue at 1.0 without stopping again
-                base_speed = 1.0
+                    base_speed = target_speed
+            else:  # distance_traveled >= 10.0 - continue without stopping again
+                base_speed = target_speed
                 
         elif mode == "3.0_stop_3.0":
+            # Use max speed appropriate for movement mode
+            target_speed = max_speed
             if distance_traveled < 8.0:
-                base_speed = 3.0
+                base_speed = target_speed
             elif distance_traveled >= 8.0 and distance_traveled < 10.0:  # Stop only in 8-10m range
                 if self.stop_start_time is None:
                     self.stop_start_time = current_time
@@ -242,11 +267,11 @@ class SimplePathController:
                     if self.was_stopped:
                         print(f"\nRobot RESUMED at {distance_traveled:.1f}m")
                         self.was_stopped = False
-                    base_speed = 3.0
-            else:  # distance_traveled >= 10.0 - continue at 3.0 without stopping again
-                base_speed = 3.0
+                    base_speed = target_speed
+            else:  # distance_traveled >= 10.0 - continue without stopping again
+                base_speed = target_speed
         else:
-            base_speed = 1.0
+            base_speed = min(1.0, max_speed)
         
         # Check if in programmed stop
         is_in_programmed_stop = (base_speed == 0.0 and 'stop' in mode and distance_traveled >= 8.0)
@@ -444,19 +469,20 @@ def main():
                     print("="*70 + "\n")
                     continue  # Skip velocity commands when path is complete
 
-                # Get target speed
-                target_speed = path_controller.get_speed(distance_traveled, current_time)
+                # Get target speed (pass movement mode for appropriate speed scaling)
+                target_speed = path_controller.get_speed(distance_traveled, current_time, path_mode)
 
                 # Periodic status output
                 is_stopped = (target_speed < 0.05)
                 
                 if current_time - last_status_time > 2.0 and not is_stopped:
-                    speed = math.sqrt(robot.current_vx**2 + robot.current_vy**2)
+                    actual_speed = math.sqrt(robot.current_vx**2 + robot.current_vy**2)
                     distance_to_goal = path_controller.path_length - distance_traveled
                     mode_name = path_controller.speed_modes[path_controller.current_speed_mode]
                     
                     status = f"\n📊 Distance: {distance_traveled:.1f}m"
-                    status += f" | Target: {target_speed:.2f}m/s ({mode_name})"
+                    status += f" | Target: {target_speed:.2f}m/s"
+                    status += f" | Actual: {actual_speed:.2f}m/s ({mode_name})"
                     status += f" | To Goal: {distance_to_goal:.1f}m"
                     
                     print(status)
