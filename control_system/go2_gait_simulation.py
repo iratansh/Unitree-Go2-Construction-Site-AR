@@ -289,7 +289,7 @@ class FixedPathController:
     """Path controller with proper speed enforcement and smoother behavior."""
     
     def __init__(self):
-        self.path_length = 15.0
+        self.path_length = 16.0
         self.braking_distance = 1.5  # Distance before goal to start braking
         self.speed_modes = [
             "1-3_gradual",     # 1m/s to 3m/s gradual increase
@@ -387,9 +387,9 @@ def main():
     p.setGravity(0, 0, -9.8)
     p.loadURDF("plane.urdf")
 
-    # Path setup - 15m straight path
+    # Path setup - 16m straight path
     start_pos = [0, 0, 0.35]
-    end_pos = [0, 15, 0.35]  # 15m forward path
+    end_pos = [0, 16, 0.35]  # 16m forward path
     
     print("Loading Go2W robot...")
     
@@ -405,19 +405,42 @@ def main():
     # Initialize path controller
     path_controller = FixedPathController()
     robot.set_standing_pose()
-    
+
+    path_modes = ['leftward', 'leftward_zigzag', 'forward', 'forward_zigzag']
+
+    def describe_path_mode(mode_name):
+        if mode_name == 'forward':
+            return 'forward (wheeled)'
+        if mode_name == 'leftward_zigzag':
+            return 'leftward zigzag (walking)'
+        if mode_name == 'forward_zigzag':
+            return 'forward zigzag (wheeled)'
+        return 'leftward linear (walking)'
+
+    def compute_zigzag_components(distance_traveled, start, end, target_speed, lateral_fraction=0.5, cycles=2.0):
+        if start <= distance_traveled < end:
+            zigzag_progress = (distance_traveled - start) / (end - start)
+            lateral_velocity = target_speed * lateral_fraction * math.sin(2 * math.pi * cycles * zigzag_progress)
+            forward_component = math.sqrt(max(0.0, target_speed**2 - lateral_velocity**2))
+            return lateral_velocity, forward_component
+        return 0.0, target_speed
+
     # Simulation state
-    path_mode = 'leftward'  # Start in leftward mode
+    path_mode_index = 0
+    path_mode = path_modes[path_mode_index]  # Start in leftward mode
     is_walking = False
     start_time = None
     initial_pos = None
     
-    # Draw 15m path
+    # Draw 16m path
     p.addUserDebugLine(start_pos, end_pos, [1, 0, 0], 3)
-    
-    # Add distance markers every 2.5m
-    for i in range(1, 7):
-        marker_pos = [0, i * 2.5, 0.35]
+
+    # Add distance markers every 2m
+    marker_spacing = 2.0
+    num_markers = int(path_controller.path_length // marker_spacing)
+    for i in range(1, num_markers + 1):
+        distance = i * marker_spacing
+        marker_pos = [0, distance, 0.35]
         p.addUserDebugLine([marker_pos[0], marker_pos[1], marker_pos[2] - 0.2], 
                           [marker_pos[0], marker_pos[1], marker_pos[2] + 0.2], 
                           [0, 1, 0], 2)
@@ -431,18 +454,18 @@ def main():
     )
     
     print("\n" + "="*50)
-    print("Go2W Path Simulation - 15m Linear Path")
+    print("Go2W Path Simulation - 16m Path")
     print("="*50)
     print("\nControls:")
     print("  SPACE: Start/Stop Walking")
-    print("  P: Switch Path Mode (forward/leftward)")
+    print("  P: Cycle Path Mode (leftward, leftward zigzag, forward, forward zigzag)")
     print("  S: Cycle Speed Mode")
     print("  G: Toggle Gaze Mode")
     print("  R: Reset Robot")
     print("\nSpeed Modes:")
     for i, mode in enumerate(path_controller.speed_modes):
         print(f"  {i}: {mode}")
-    print(f"\nStarting Mode: {path_mode}")
+    print(f"\nStarting Mode: {describe_path_mode(path_mode)}")
     print(f"Braking zone: Last {path_controller.braking_distance}m (yellow marker)")
     print("="*50 + "\n")
 
@@ -462,21 +485,24 @@ def main():
                 print(f"Walking: {'ON' if is_walking else 'OFF'}")
                 
             if ord('p') in keys and keys[ord('p')] & p.KEY_WAS_TRIGGERED:
-                path_mode = 'leftward' if path_mode == 'forward' else 'forward'
-                
+                path_mode_index = (path_mode_index + 1) % len(path_modes)
+                path_mode = path_modes[path_mode_index]
+
                 # Set robot mode and orientation based on path mode
                 current_pos = robot.get_position()
-                if path_mode == 'forward':
+                if path_mode in ('forward', 'forward_zigzag'):
                     # Face toward goal (Y direction = 90 degrees)
                     new_orientation = p.getQuaternionFromEuler([0, 0, math.pi/2])
                     robot.set_mode('wheeled')
-                else:  # leftward
-                    # Face perpendicular to path (0 degrees) 
+                else:  # leftward linear or zigzag
+                    # Face perpendicular to path (0 degrees)
                     new_orientation = p.getQuaternionFromEuler([0, 0, 0])
                     robot.set_mode('walking')
-                
+
                 p.resetBasePositionAndOrientation(robot.robot_id, current_pos, new_orientation)
-                print(f"Path Mode: {path_mode} (robot mode: {robot.mode})")
+                path_controller.was_stopped = False
+                path_controller.stop_start_time = None
+                print(f"Path Mode: {describe_path_mode(path_mode)} (robot mode: {robot.mode})")
                 
             if ord('s') in keys and keys[ord('s')] & p.KEY_WAS_TRIGGERED:
                 path_controller.current_speed_mode = (path_controller.current_speed_mode + 1) % len(path_controller.speed_modes)
@@ -494,7 +520,8 @@ def main():
             if ord('r') in keys and keys[ord('r')] & p.KEY_WAS_TRIGGERED:
                 robot.reset()
                 is_walking = False
-                path_mode = 'leftward'
+                path_mode_index = 0
+                path_mode = path_modes[path_mode_index]
                 robot.set_mode('walking')
                 path_controller.was_stopped = False
                 path_controller.stop_start_time = None
@@ -507,14 +534,19 @@ def main():
                 
                 # Calculate distance traveled from start
                 if initial_pos is not None:
-                    distance_traveled = math.sqrt((current_pos[0] - initial_pos[0])**2 + 
-                                                (current_pos[1] - initial_pos[1])**2)
+                    distance_traveled = max(0.0, current_pos[1] - initial_pos[1])
                 else:
-                    distance_traveled = 0
+                    distance_traveled = 0.0
                 
-                # Get current speed from path controller
-                target_speed = path_controller.get_speed(distance_traveled, current_time)
+                # Get current speed from path controller or override for zigzag modes
+                if path_mode in ('leftward_zigzag', 'forward_zigzag'):
+                    target_speed = 1.0
+                    path_controller.last_speed = target_speed
+                else:
+                    target_speed = path_controller.get_speed(distance_traveled, current_time)
                 gaze_angle = path_controller.get_gaze_angle(elapsed_time)
+
+                distance_to_goal = path_controller.path_length - distance_traveled
                 
                 # Handle stop/resume console output
                 is_stopped = (target_speed == 0.0)
@@ -526,103 +558,119 @@ def main():
                     path_controller.was_stopped = False
                 
                 # Calculate velocities based on path mode
-                if path_mode == 'forward' and robot.mode == 'wheeled':
-                    # Use omnidirectional wheels for forward movement with path correction
+                if path_mode in ('forward', 'forward_zigzag') and robot.mode == 'wheeled':
                     current_pos, current_yaw = robot.get_position_and_orientation()
                     target_yaw = math.pi/2  # Face toward +Y direction
-                    
-                    # Check if we're in a stop period
-                    mode = path_controller.speed_modes[path_controller.current_speed_mode]
-                    is_in_stop_period = (target_speed < 0.05 and 
-                                       ('stop' in mode) and 
-                                       distance_traveled >= 8.0)
-                    
-                    # path correction - prevent oscillations at high speeds
-                    path_error = current_pos[0] - 0.0
-                    abs_error = abs(path_error)
 
-                    # Only correct laterally if error is significant or we're in stop period
-                    if is_in_stop_period or abs_error > 0.1:
-                        # Allow gentle lateral correction when deviation is large or we're stopped
-                        lateral_correction = -path_error * 0.3
-                        lateral_correction = max(-0.2, min(0.2, lateral_correction))
+                    yaw_error = target_yaw - current_yaw
+                    while yaw_error > math.pi:
+                        yaw_error -= 2 * math.pi
+                    while yaw_error < -math.pi:
+                        yaw_error += 2 * math.pi
+
+                    if path_mode == 'forward_zigzag':
+                        zigzag_start = 5.0
+                        zigzag_end = 11.0
+                        zigzag_cycles = 2.0
+                        lateral_fraction = 0.6
+
+                        lateral_velocity, forward_component = compute_zigzag_components(
+                            distance_traveled,
+                            zigzag_start,
+                            zigzag_end,
+                            target_speed,
+                            lateral_fraction,
+                            zigzag_cycles
+                        )
+
+                        yaw_correction = 0.0 if distance_to_goal < 0.5 else 0.05 * yaw_error
+                        robot.set_omnidirectional_velocity(lateral_velocity, forward_component, yaw_correction)
                     else:
-                        lateral_correction = 0.0
+                        # Use omnidirectional wheels for forward movement with path correction
+                        mode = path_controller.speed_modes[path_controller.current_speed_mode]
+                        is_in_stop_period = (target_speed < 0.05 and
+                                             ('stop' in mode) and
+                                             distance_traveled >= 8.0)
 
-                    # Disable yaw correction for straight-line movement
-                    yaw_correction = 0.0
+                        path_error = current_pos[0] - 0.0
+                        abs_error = abs(path_error)
 
-                    # Apply the velocity to the robot
-                    robot.set_omnidirectional_velocity(
-                        target_speed,        # Forward speed
-                        lateral_correction,  # Lateral speed (usually zero)
-                        yaw_correction       # Angular velocity (zero)
-                    )
-                    
-                    if is_in_stop_period:
-                        # GENTLE corrections during stop periods to prevent divergence
-                        lateral_correction = -path_error * 0.4  # Gentle correction
-                        lateral_correction = max(-0.3, min(0.3, lateral_correction))
-                        yaw_correction = 0.0  # No yaw correction during stops
-                    else:
-                        # corrections - less aggressive to prevent oscillations
-                        # Reduce gain at higher speeds to prevent overcorrection
-                        base_gain = 1.0  # Reduced from 1.2
-                        speed_reduction = min(0.3, target_speed / 10.0)  # Slight reduction at high speed
-                        adaptive_gain = base_gain - speed_reduction
-                        
-                        lateral_correction = -path_error * adaptive_gain
-                        # Conservative limits to prevent overcorrection
-                        lateral_correction = max(-0.6, min(0.6, lateral_correction))
-                        
-                        # relaxed yaw control - don't fight lateral corrections
-                        yaw_error = target_yaw - current_yaw
-                        while yaw_error > math.pi:
-                            yaw_error -= 2*math.pi
-                        while yaw_error < -math.pi:
-                            yaw_error += 2*math.pi
-                        
-                        # Disable corrections when very close to goal
-                        distance_to_goal = path_controller.path_length - distance_traveled
-                        if distance_to_goal < 0.5:
+                        if is_in_stop_period or abs_error > 0.1:
+                            lateral_correction = -path_error * 0.3
+                            lateral_correction = max(-0.2, min(0.2, lateral_correction))
+                        else:
                             lateral_correction = 0.0
+
+                        yaw_correction = 0.0
+                        robot.set_omnidirectional_velocity(
+                            target_speed,
+                            lateral_correction,
+                            yaw_correction
+                        )
+
+                        if is_in_stop_period:
+                            lateral_correction = -path_error * 0.4
+                            lateral_correction = max(-0.3, min(0.3, lateral_correction))
                             yaw_correction = 0.0
                         else:
-                            # Much gentler yaw correction that doesn't interfere with forward movement
-                            yaw_correction = 0.05 * yaw_error  # Reduced from 0.1
-                    
-                    # prioritize forward movement over perfect orientation
-                    yaw_threshold = 0.25  # Increased tolerance before stopping to rotate
-                    if not is_in_stop_period and abs(yaw_error) > yaw_threshold:
-                        # Only stop for very large yaw errors, and correct more gently
-                        robot.set_omnidirectional_velocity(
-                            target_speed * 0.5,  # Keep some forward movement
-                            lateral_correction * 0.5,  # Reduced lateral correction during yaw fix
-                            1.0 * yaw_error  # Moderate yaw correction
-                        )
-                    else:  # Normal forward movement with smooth corrections
-                        robot.set_omnidirectional_velocity(
-                            target_speed,           # Full forward movement
-                            lateral_correction,     # Smooth lateral correction
-                            yaw_correction         # Gentle yaw correction
-                        )
-                    
+                            base_gain = 1.0
+                            speed_reduction = min(0.3, target_speed / 10.0)
+                            adaptive_gain = base_gain - speed_reduction
+
+                            lateral_correction = -path_error * adaptive_gain
+                            lateral_correction = max(-0.6, min(0.6, lateral_correction))
+
+                            if distance_to_goal < 0.5:
+                                lateral_correction = 0.0
+                                yaw_correction = 0.0
+                            else:
+                                yaw_correction = 0.05 * yaw_error
+
+                        yaw_threshold = 0.25
+                        if not is_in_stop_period and abs(yaw_error) > yaw_threshold:
+                            robot.set_omnidirectional_velocity(
+                                target_speed * 0.5,
+                                lateral_correction * 0.5,
+                                1.0 * yaw_error
+                            )
+                        else:
+                            robot.set_omnidirectional_velocity(
+                                target_speed,
+                                lateral_correction,
+                                yaw_correction
+                            )
+
                 else:  # leftward mode using walking
-                    # Move toward goal (positive Y) while facing perpendicular to path
-                    # Same as regular Go2 - just set base velocity and apply gait
-                    linear_velocity = [0, target_speed, 0]  # Move along Y-axis toward goal
-                    
+                    in_braking_zone = distance_to_goal <= path_controller.braking_distance
+
+                    if path_mode == 'leftward_zigzag':
+                        zigzag_start = 5.0
+                        zigzag_end = 11.0
+                        zigzag_cycles = 2.0
+                        lateral_fraction = 0.6
+
+                        lateral_velocity, forward_component = compute_zigzag_components(
+                            distance_traveled,
+                            zigzag_start,
+                            zigzag_end,
+                            target_speed,
+                            lateral_fraction,
+                            zigzag_cycles
+                        )
+
+                        linear_velocity = [lateral_velocity, forward_component, 0]
+                    else:
+                        # Linear leftward path
+                        linear_velocity = [0, target_speed, 0]
+
                     # Apply gaze control
                     gaze_rad = math.radians(gaze_angle)
                     angular_velocity = [0, 0, gaze_rad * 0.1]  # Subtle gaze movement
-                    
+
                     # Set base velocity (same as regular Go2)
                     robot.set_base_velocity(linear_velocity, angular_velocity)
-                    
+
                     # Apply gait only when moving at reasonable speed and NOT in braking zone
-                    distance_to_goal = path_controller.path_length - distance_traveled
-                    in_braking_zone = distance_to_goal <= path_controller.braking_distance
-                    
                     if target_speed > 0.3 and not in_braking_zone:  # Higher threshold and exclude braking zone
                         speed_factor = max(0.5, min(1.5, target_speed / 2.0))  # More conservative speed factor
                         robot.apply_trot_gait(elapsed_time, speed_factor)
