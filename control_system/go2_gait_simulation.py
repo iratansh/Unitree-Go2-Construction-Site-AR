@@ -583,8 +583,14 @@ def main():
                             zigzag_cycles
                         )
 
+                        # Convert world velocities to robot frame for mecanum control
+                        cos_yaw = math.cos(current_yaw)
+                        sin_yaw = math.sin(current_yaw)
+                        vx_body = cos_yaw * lateral_velocity + sin_yaw * forward_component
+                        vy_body = -sin_yaw * lateral_velocity + cos_yaw * forward_component
+
                         yaw_correction = 0.0 if distance_to_goal < 0.5 else 0.05 * yaw_error
-                        robot.set_omnidirectional_velocity(lateral_velocity, forward_component, yaw_correction)
+                        robot.set_omnidirectional_velocity(vx_body, vy_body, yaw_correction)
                     else:
                         # Use omnidirectional wheels for forward movement with path correction
                         mode = path_controller.speed_modes[path_controller.current_speed_mode]
