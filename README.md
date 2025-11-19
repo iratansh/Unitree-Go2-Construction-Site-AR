@@ -2,54 +2,60 @@
 
 ## Overview
 
-This project combines a Unity-based AR construction site with Python control for a physical Unitree Go2 robot. Unity renders the environment to a Meta Quest headset, while Python scripts handle robot control in simulation and on the real robot using the Unitree SDK.
+The repository combines a Unity-based construction-site visualization with
+Python scripts that command a Unitree Go2 robot. Unity renders an AR scene
+for a Meta Quest headset, while the Python tooling handles a PyBullet test
+bed and the real-robot gait controller that runs on the Go2W onboard
+computer via the official Unitree SDK.
 
-Current capabilities:
+## Hardware & Software Requirements
 
-- Unity AR environment targeting Meta Quest
-- PyBullet simulation of Go2 locomotion
-- Real-robot control via Unitree SDK
-- Low-latency native control client using official SDK (new)
-- Optional modules: EmotiBit data capture
+### Hardware
+- Unitree Go2 robot with the Go2W computer module
+- Development workstation for Unity/Python (Windows/Linux/macOS)
+- Meta Quest headset for the AR experience
+- Gigabit Ethernet cable between the workstation and the Go2W (for
+  transferring scripts and tethering during control)
+- Optional: EmotiBit sensor for physiological data logging
 
-## Repository Structure
+### Software
+- Unity 2020.3.19f1 (recorded in `ProjectSettings/ProjectVersion.txt`)
+- Python 3.10+ with `conda` or `venv`
+- Unitree `unitree_sdk2_python` checked out on the Go2W at
+  `/home/unitree/unitree_sdk2_python`
+- Meta Quest build support installed inside Unity if you plan to deploy AR
+
+## Repository Layout
 
 ```
 .
-├── environment.yml                  # Conda env for Python tooling
-├── ip_address.env                   # Optional network/IP config
-├── LICENSE.md
-├── README.md
-├── Assets/                          # Unity assets (models, scenes, scripts, XR, etc.)
-├── ProjectSettings/                 # Unity project settings (Unity 2020.3.19f1)
-├── Packages/                        # Unity package manifests
+├── Assets/                        # Unity scenes, prefabs, and scripts
 ├── control_system/
-│   ├── go2_gait_simulation.py       # PyBullet simulation
-│   ├── go2_gait.py                  # Real-robot (gait) control via Unitree SDK
-│   └── URDF/                        # Robot model for simulation
+│   ├── go2_gait.py                # Real-robot gait controller using the SDK
+│   ├── go2_gait_simulation.py     # PyBullet parity test for the controller
+│   └── URDF/                      # Go2W description used in simulation
 ├── data_processing/
-   └── emotibit.py                  # Optional EmotiBit data capture
+│   └── emotibit.py                # Quick-look plots for EmotiBit exports
+├── environment.yml                # Conda definition for Python tooling
+├── ip_address.env                 # Optional helper for storing IP/interface
+├── Packages/, ProjectSettings/, UserSettings/, Assets/ (Unity project)
+├── LICENSE.md
+└── README.md
 ```
-
-## Unity AR Environment
-
-- Unity version: 2020.3.19f1 (confirmed in `ProjectSettings/ProjectVersion.txt`).
-- Open this folder as a Unity project and build for Meta Quest.
-- Scenes and XR configuration are under `Assets/`.
 
 ## Python Environment Setup
 
-You can use conda (recommended) or plain Python.
+Create an environment on your development machine for simulation and data
+processing utilities.
 
-Option A: Conda
+**Conda**
 
 ```bash
-# From repo root
 conda env create -f environment.yml
 conda activate go2-ar
 ```
 
-Option B: Python + pip
+**Python venv**
 
 ```bash
 python3 -m venv .venv
@@ -58,70 +64,107 @@ pip install --upgrade pip
 pip install pybullet numpy
 ```
 
-Install the Unitree SDK Python bindings (required for real-robot control):
+Install the Unitree SDK Python bindings on the Go2W (they are only needed
+for `go2_gait.py`).
 
 ```bash
 git clone https://github.com/unitreerobotics/unitree_sdk2_python.git /home/unitree/unitree_sdk2_python
 pip install -e /home/unitree/unitree_sdk2_python
 ```
 
-If your SDK path differs, either edit the path appended in `control_system/native_control.py` or set PYTHONPATH, e.g.:
+If the SDK ends up elsewhere, add it to `PYTHONPATH` on the Go2W before
+running the control scripts, for example:
 
 ```bash
 export PYTHONPATH=/path/to/unitree_sdk2_python:$PYTHONPATH
 ```
 
-Optional modules:
+## Real-Robot Control Workflow (Go2W)
 
-- EmotiBit data capture: handled by `data_processing/emotibit.py` (hardware required).
+`control_system/go2_gait.py` **must** run directly on the Go2W computer so
+that it can open the `eth0` interface used by the SportClient API. A typical
+workflow looks like:
 
-## Running
+1. Connect your workstation to the Go2W Ethernet port. The factory default
+   addressing is `192.168.123.18` on the robot.
+2. Copy the control scripts onto the Go2W (example using `rsync`):
 
-Safety first: Ensure a clear area around the robot. Keep an E-stop accessible.
+   ```bash
+   rsync -av control_system unitree@192.168.123.18:~/go2_ar_control
+   ```
 
-1) Simulation (PyBullet)
+3. SSH into the robot (`ssh unitree@192.168.123.18`, password `123`).
+4. Source any desired environment variables (you can place them into
+   `ip_address.env` and `source ip_address.env`).
+5. Run the gait controller, explicitly passing the Ethernet interface the
+   SDK should bind to:
+
+   ```bash
+   cd ~/go2_ar_control
+   python3 go2_gait.py eth0
+   ```
+
+   The script will stand the robot up, open a 50 Hz loop, and expose a
+   keyboard UI:
+   - `SPACE`: start/stop the current scripted path
+   - `P`: cycle between forward/leftward/zigzag paths
+   - `S`: cycle speed profiles (gradual ramp, stop-and-go, etc.)
+   - `R`: reset the estimated pose so the next run restarts the 16 m path
+   - `ESC` or `Ctrl+C`: emergency stop and exit
+
+Keep an E-stop close by and ensure the operator area is clear before
+enabling torque. Because the Go2W Ethernet port is dedicated to the robot
+bus, avoid running through Wi-Fi bridges; a direct `eth0` connection keeps
+latency deterministic.
+
+## Simulation Workflow
+
+`control_system/go2_gait_simulation.py` mirrors the logic of
+`go2_gait.py` using PyBullet. Run it on your workstation to vet new speed
+profiles or zigzag logic before pushing code to the robot:
 
 ```bash
 python3 control_system/go2_gait_simulation.py
 ```
 
-2) Real Robot – Gait Control
+The script attempts to open the GUI; if unavailable, it falls back to
+headless `DIRECT` mode. Keyboard bindings match the real-robot script. The
+URDFs in `control_system/URDF` are kept in sync with Unitree's public model.
 
-# Example interface: eth0
+## Unity AR Environment
 
-python3 control_system/go2_gait.py <network_interface>
+Open the repository root inside Unity 2020.3.19f1 (or newer 2020 LTS). The
+XR settings, scenes, and scripts live under `Assets/`. Build targets should
+be configured for Meta Quest. Unity-specific settings (graphics, input, XR)
+are tracked in `ProjectSettings/` so teammates can reproduce the build.
 
-3) Real Robot – Native SDK Control (new)
-   Low-latency direct control using Unitree SportClient.
+## Optional: EmotiBit Data Capture
+
+`data_processing/emotibit.py` plots EmotiBit CSV exports for quick QA. Set
+the `file_path` constant to your raw CSV and run the script from your
+workstation environment:
 
 ```bash
-python3 control_system/native_control.py <network_interface>
+python3 data_processing/emotibit.py
 ```
 
-Controls (keyboard):
+Each numeric sensor channel is plotted with timestamps and the console
+prints row counts per sensor type.
 
-- SPACE: toggle auto 15 m straight-line motion
-- W/A/S/D: translate (vx/vy)
-- Q/E: rotate (yaw)
-- R: stand up
-- F: sit down
-- ESC: exit
+## IP Configuration Helper
 
-Notes:
+`ip_address.env` is intentionally excluded from source control. Use it to
+store deployment-specific values (robot IP, workstation static IP, etc.) so
+they can be sourced before running scripts on the Go2W. Example contents:
 
-- Default auto speed: 0.5 m/s, distance: 15 m
-- Script uses `ChannelFactoryInitialize(0, <network_interface>)`
+```
+export GO2_IP=192.168.123.18
+export GO2_INTERFACE=eth0
+```
 
-## Networking
+## License and Credits
 
-Typical Go2 default: robot IP 192.168.123.18. Connect via ethernet and ssh into the go2w using ssh unitree@192.168.123.18. Password is 123. Transfer control system over to the ssh instance and run the go2_gait script. Supply the host interface name to the Python scripts. You may store and source values from `ip_address.env` if desired.
-
-## License
-
-See `LICENSE.md`.
-
-## Acknowledgements
-
-This project builds upon the open-source InteraConstruction simulator (MIT). Thanks to the original authors.
-
-- Original repository: https://github.com/F21-G1-S5/InteraConstruction
+The project is released under the MIT License (see `LICENSE.md`). Parts of
+the Unity environment build upon the open-source
+[InteraConstruction](https://github.com/F21-G1-S5/InteraConstruction)
+simulator—thanks to the original authors for making their work available.
