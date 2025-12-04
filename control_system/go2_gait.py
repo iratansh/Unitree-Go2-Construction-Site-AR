@@ -108,7 +108,13 @@ class Go2EthernetControl:
                 return False
         
     def set_velocity(self, vx, vy, omega):
-        """Send a velocity command using SportClient.Move."""
+        """Send a velocity command using SportClient.Move.
+        
+        Note on Go2W speed limits:
+        - The Go2W (wheeled version) may have different speed limits than standard Go2
+        - SportClient.Move() may internally limit speeds regardless of what we send
+        - Typical Go2W forward speed limit: ~1.5-2.0 m/s (varies by firmware)
+        """
         # Update smoothed values only to keep console output readable.
         if abs(vx) < 0.1 and abs(vy) < 0.1:
             smoothing = 0.3
@@ -119,14 +125,15 @@ class Go2EthernetControl:
         self.current_vy += smoothing * (vy - self.current_vy)
         self.current_omega += smoothing * (omega - self.current_omega)
         
-        # Use the input velocities, not the smoothed ones
+        # Clamp to SDK limits (the robot may further limit these internally)
+        # Go2W wheeled mode may have lower actual limits than these
         vx_clamped = np.clip(vx, -3.0, 3.0)  # Forward/backward limits
-        vy_clamped = np.clip(vy, -0.50, 0.50)  # Allow up to 0.5m/s lateral to test Go2w's actual limits
+        vy_clamped = np.clip(vy, -0.50, 0.50)  # Lateral limits
         omega_clamped = np.clip(omega, -1.5, 1.5)  # Rotation limits
         
         # Debug when lateral speeds are being limited
         if abs(vy) > 0.50 and abs(vy_clamped) <= 0.50:
-            print(f"\n[LATERAL_LIMIT] Requested vy={vy:.2f} clamped to {vy_clamped:.2f} (testing Go2w limits)")
+            print(f"\n[LATERAL_LIMIT] Requested vy={vy:.2f} clamped to {vy_clamped:.2f}")
         
         # Send stop command if all velocities are zero
         if abs(vx_clamped) < 0.01 and abs(vy_clamped) < 0.01 and abs(omega_clamped) < 0.01:
@@ -142,15 +149,10 @@ class Go2EthernetControl:
         self.position[1] += vy_clamped * dt
         self.yaw += omega_clamped * dt
         
-        # Debug position updates occasionally
-        if abs(vx_clamped) > 0.1 or abs(vy_clamped) > 0.1:
-            if int(time.time() * 10) % 50 == 0:  # Every ~5 seconds when moving
-                print(f"\n[POSITION] Old: {old_pos}, New: {self.position}, Delta: vx={vx_clamped*dt:.3f}, vy={vy_clamped*dt:.3f}")
-        
-        # Debug output
+        # Debug output (simplified - removed position spam)
         if abs(vx_clamped) > 0.01 or abs(vy_clamped) > 0.01 or abs(omega_clamped) > 0.01:
             print(f"\rMove cmd: vx={vx_clamped:.2f}, vy={vy_clamped:.2f}, omega={omega_clamped:.2f}, result={code}", end='', flush=True)
-        elif code == 0:  # Show stop commands too
+        elif code == 0:
             print(f"\rStop cmd sent, result={code}", end='', flush=True)
         
         return code == 0
@@ -184,6 +186,11 @@ class SimplePathController:
     def __init__(self):
         self.path_length = 16.0
         self.braking_distance = 2.5  # Increased braking distance so robot reaches full speed earlier
+        
+        # Speed category: 'profile' for variable speed profiles, 'fixed' for constant speeds
+        self.speed_category = 'profile'
+        
+        # Variable speed profiles (original modes)
         self.speed_modes = [
             "0.5-3.0_gradual",  # 0.5m/s to 3.0m/s gradual increase 
             "3.0-0.5_gradual",  # 3.0m/s to 0.5m/s gradual decrease  
@@ -191,6 +198,13 @@ class SimplePathController:
             "3.0_stop_3.0"      # 3.0m/s, stop at 8m, then 3.0m/s
         ]
         self.current_speed_mode = 0
+        
+        # Fixed speed modes (linear forward motion at constant speed)
+        # Note: Go2W wheeled mode may have actual max speed ~1.5 m/s
+        # These are the commanded speeds - robot may internally limit higher values
+        self.fixed_speeds = [0.5, 0.75, 1.0, 1.25, 1.5]  # m/s (realistic range for Go2W)
+        self.current_fixed_speed_index = 0
+        
         self.gaze_enabled = False
         self.was_stopped = False
         self.stop_start_time = None
@@ -293,6 +307,38 @@ class SimplePathController:
         self.last_speed = smoothed_speed
         
         return smoothed_speed
+    
+    def get_fixed_speed(self, distance_traveled):
+        """Get speed for fixed speed mode (constant speed with braking at end)"""
+        base_speed = self.fixed_speeds[self.current_fixed_speed_index]
+        
+        # Apply braking near the end
+        distance_to_goal = self.path_length - distance_traveled
+        if distance_to_goal <= self.braking_distance and distance_to_goal > 0:
+            brake_factor = distance_to_goal / self.braking_distance
+            base_speed = base_speed * brake_factor
+        elif distance_to_goal <= 0:
+            base_speed = 0.0
+        
+        # For fixed speed modes, use minimal smoothing to reach target quickly
+        # Only smooth during acceleration from stop, not during constant speed
+        if self.last_speed < 0.1:
+            # Starting from stop - ramp up quickly
+            smoothed_speed = 0.3 * self.last_speed + 0.7 * base_speed
+        else:
+            # Already moving - use very light smoothing (almost no delay)
+            smoothed_speed = 0.1 * self.last_speed + 0.9 * base_speed
+        
+        self.last_speed = smoothed_speed
+        
+        return smoothed_speed
+    
+    def get_current_speed_description(self):
+        """Get a human-readable description of current speed setting"""
+        if self.speed_category == 'fixed':
+            return f"Fixed {self.fixed_speeds[self.current_fixed_speed_index]:.2f} m/s"
+        else:
+            return f"Profile: {self.speed_modes[self.current_speed_mode]}"
 
 class KeyboardInput:
     """Non-blocking keyboard input handler"""
@@ -381,14 +427,21 @@ def main():
         print("\nControls:")
         print("   SPACE  : Start/Stop Movement")
         print("   P      : Cycle Path Mode (forward/leftward/leftward_zigzag)")
-        print("   S      : Cycle Speed Profile")
+        print("   S      : Cycle Speed (within current category)")
+        print("   C      : Toggle Speed Category (Profile/Fixed)")
         print("   R      : Reset Position")
         print("   ESC    : Emergency Stop")
         print("   Ctrl+C : Force Exit")
         
+        print("\nSpeed Categories:")
+        print("   Profile : Variable speed profiles (gradual, stop modes)")
+        print("   Fixed   : Constant speeds (0.5, 0.75, 1.0, 1.25, 1.5 m/s)")
+        print("   Note    : Go2W max speed in wheeled mode may be ~1.5 m/s")
+        
         print("\nPath Settings:")
         print(f"   Length         : {path_controller.path_length}m")
         print(f"   Braking Distance: {path_controller.braking_distance}m")
+        print(f"   Current Speed  : {path_controller.get_current_speed_description()}")
         
         print("\nPress SPACE to start movement")
         print("="*70 + "\n")
@@ -408,6 +461,7 @@ def main():
                         initial_pos = robot.position.copy()
                     path_controller.stop_start_time = None
                     path_controller.was_stopped = False
+                    path_controller.last_speed = 0.0  # Reset speed smoothing on start
                     print(f"Movement started: {path_mode} direction")
                 else:
                     robot.stop()
@@ -419,9 +473,23 @@ def main():
                 print(f"Path mode changed: {path_mode}")
                 
             if ord('s') in keys:
-                path_controller.current_speed_mode = (path_controller.current_speed_mode + 1) % len(path_controller.speed_modes)
-                mode_name = path_controller.speed_modes[path_controller.current_speed_mode]
-                print(f"Speed profile changed: {mode_name}")
+                # Cycle within current speed category
+                if path_controller.speed_category == 'fixed':
+                    path_controller.current_fixed_speed_index = (path_controller.current_fixed_speed_index + 1) % len(path_controller.fixed_speeds)
+                    print(f"Fixed speed changed: {path_controller.fixed_speeds[path_controller.current_fixed_speed_index]:.2f} m/s")
+                else:
+                    path_controller.current_speed_mode = (path_controller.current_speed_mode + 1) % len(path_controller.speed_modes)
+                    mode_name = path_controller.speed_modes[path_controller.current_speed_mode]
+                    print(f"Speed profile changed: {mode_name}")
+            
+            if ord('c') in keys:
+                # Toggle speed category
+                if path_controller.speed_category == 'profile':
+                    path_controller.speed_category = 'fixed'
+                    print(f"Speed category changed: FIXED ({path_controller.fixed_speeds[path_controller.current_fixed_speed_index]:.2f} m/s)")
+                else:
+                    path_controller.speed_category = 'profile'
+                    print(f"Speed category changed: PROFILE ({path_controller.speed_modes[path_controller.current_speed_mode]})")
                 
             if ord('r') in keys:
                 robot.stop()
@@ -475,11 +543,15 @@ def main():
                     print("="*70 + "\n")
                     continue  # Skip velocity commands when path is complete
 
-                # Get target speed - zigzag modes use fixed 1.0 m/s
+                # Get target speed based on speed category and path mode
                 if path_mode == 'leftward_zigzag':
                     target_speed = 1.0  # Fixed speed for zigzag
                     path_controller.last_speed = target_speed
+                elif path_controller.speed_category == 'fixed':
+                    # Use fixed constant speed
+                    target_speed = path_controller.get_fixed_speed(distance_traveled)
                 else:
+                    # Use variable speed profile
                     target_speed = path_controller.get_speed(distance_traveled, current_time, path_mode)
 
                 # Periodic status output
@@ -488,11 +560,11 @@ def main():
                 if current_time - last_status_time > 2.0 and not is_stopped:
                     actual_speed = math.sqrt(robot.current_vx**2 + robot.current_vy**2)
                     distance_to_goal = path_controller.path_length - distance_traveled
-                    mode_name = path_controller.speed_modes[path_controller.current_speed_mode]
+                    speed_desc = path_controller.get_current_speed_description()
                     
                     status = f"\nDistance: {distance_traveled:.1f} m"
                     status += f" | Target: {target_speed:.2f}m/s"
-                    status += f" | Actual: {actual_speed:.2f}m/s ({mode_name})"
+                    status += f" | Actual: {actual_speed:.2f}m/s ({speed_desc})"
                     status += f" | To Goal: {distance_to_goal:.1f}m"
                     
                     print(status)
