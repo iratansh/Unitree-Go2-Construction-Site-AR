@@ -288,15 +288,29 @@ class KeyboardInput:
         self.running = True
         self.lock = threading.Lock()
         self.events = []
-    def start(self): threading.Thread(target=self._listen, daemon=True).start()
-    def stop(self): self.running = False
+        self.old_settings = None
+        self.fd = sys.stdin.fileno()
+        
+    def start(self):
+        # Save terminal settings BEFORE starting thread
+        self.old_settings = termios.tcgetattr(self.fd)
+        threading.Thread(target=self._listen, daemon=True).start()
+        
+    def stop(self):
+        self.running = False
+        # Restore terminal settings from main thread
+        if self.old_settings:
+            try:
+                termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old_settings)
+            except:
+                pass
+                
     def get_key(self):
         with self.lock: return self.events.pop(0) if self.events else None
+        
     def _listen(self):
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
         try:
-            tty.setcbreak(fd)
+            tty.setcbreak(self.fd)
             while self.running:
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     k = sys.stdin.read(1)
@@ -304,7 +318,8 @@ class KeyboardInput:
                         if k == ' ': self.events.append('SPACE')
                         elif k.lower() == 'r': self.events.append('R')
                         elif k == '\x1b' or k == '\x03': self.events.append('ESC')
-        finally: termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except:
+            pass
 
 def main():
     parser = argparse.ArgumentParser()
@@ -394,7 +409,16 @@ def main():
     except Exception as e:
         console.print_exception()
     finally:
+        # CRITICAL: Restore terminal settings first
         kb.stop()
+        
+        # Additional safety: force restore terminal to sane state
+        try:
+            import os
+            os.system('stty sane 2>/dev/null')
+        except:
+            pass
+        
         if robot:
             print("\n[SHUTDOWN] Stopping robot...")
             robot.stop()
