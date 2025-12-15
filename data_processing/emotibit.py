@@ -1,12 +1,26 @@
-import pandas as pd
+"""Quick-look plotting utility for EmotiBit CSV exports.
+
+Set ``file_path`` to the raw CSV produced by the EmotiBit utility. The
+script normalizes line lengths, plots each numeric sensor channel, and
+prints a summary of row counts per sensor type so that recording quality
+can be assessed before ingestion into a larger pipeline.
+"""
+
 import matplotlib.pyplot as plt
 from collections import Counter
+from pathlib import Path
 
-# ---- Step 1: Load and parse the CSV ----
-file_path = ""  
+file_path = ""  # Path to the EmotiBit CSV export
+
+if not file_path:
+    raise ValueError("Set 'file_path' to the EmotiBit CSV you want to inspect")
+
+csv_path = Path(file_path)
+if not csv_path.exists():
+    raise FileNotFoundError(f"EmotiBit export not found: {csv_path}")
 
 # Read raw lines from the CSV (handles inconsistent rows)
-with open(file_path, "r") as file:
+with csv_path.open("r", encoding="utf-8") as file:
     lines = file.readlines()
 
 # Split each line by comma
@@ -17,16 +31,16 @@ print("Detected Sensor Types:", sensor_types)
 numerical_sensors = ["EA", "EL", "HR", "T1", "AX", "AY", "AZ", "GX", "GY", "GZ"]
 
 sensor_labels = {
-    "EA": ("Electrodermal Activity (EDA)", "EDA (µS)"),
-    "EL": ("Smoothed Electrodermal Activity", "EDA (µS)"),
+    "EA": ("Electrodermal Activity (EDA)", "EDA (uS)"),
+    "EL": ("Smoothed Electrodermal Activity", "EDA (uS)"),
     "HR": ("Heart Rate", "Heart Rate (BPM)"),
-    "T1": ("Skin Temperature", "Temperature (°C)"),
+    "T1": ("Skin Temperature", "Temperature (deg C)"),
     "AX": ("Accelerometer X-Axis", "Acceleration (g)"),
     "AY": ("Accelerometer Y-Axis", "Acceleration (g)"),
     "AZ": ("Accelerometer Z-Axis", "Acceleration (g)"),
-    "GX": ("Gyroscope X-Axis", "Angular Velocity (°/s)"),
-    "GY": ("Gyroscope Y-Axis", "Angular Velocity (°/s)"),
-    "GZ": ("Gyroscope Z-Axis", "Angular Velocity (°/s)"),
+    "GX": ("Gyroscope X-Axis", "Angular Velocity (deg/s)"),
+    "GY": ("Gyroscope Y-Axis", "Angular Velocity (deg/s)"),
+    "GZ": ("Gyroscope Z-Axis", "Angular Velocity (deg/s)"),
 }
 
 sensor_data = {sensor: [] for sensor in numerical_sensors}

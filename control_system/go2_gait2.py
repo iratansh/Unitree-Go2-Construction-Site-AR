@@ -67,7 +67,7 @@ class Go2EthernetControl:
             self.client = SportClient()
             self.client.SetTimeout(10.0)
             self.client.Init()
-                
+	        
         self.position = [0.0, 0.0, 0.35]
         self.yaw = 0.0
         self.measured_velocity = [0.0, 0.0, 0.0]
@@ -182,10 +182,14 @@ class Go2EthernetControl:
         # Simulation / fallback integration (only integrate what we aren't receiving)
         dt = 0.02
         if not (_SDK_AVAILABLE and _STATE_AVAILABLE and self.pose_received):
-            self.position[0] += self.current_vx * dt
-            self.position[1] += self.current_vy * dt
+            # Treat Move(vx, vy) as body-frame velocities and rotate into a world-frame estimate.
+            yaw = float(self.yaw)
+            vx_world = float(vx) * math.cos(yaw) - float(vy) * math.sin(yaw)
+            vy_world = float(vx) * math.sin(yaw) + float(vy) * math.cos(yaw)
+            self.position[0] += vx_world * dt
+            self.position[1] += vy_world * dt
         if not (_SDK_AVAILABLE and _STATE_AVAILABLE and self.yaw_received):
-            self.yaw += self.current_omega * dt
+            self.yaw += float(omega) * dt
 
         if _SDK_AVAILABLE:
             vx = np.clip(vx, -3.0, 3.0)
@@ -219,6 +223,10 @@ class ExperimentalController:
         self.gaze_stop_position = 8.0
         self.gaze_stop_duration = 2.0
         self.gaze_rotate_pause = 4.0
+        # Braking profile used to reach the stop marker consistently across speeds.
+        # The commanded speed is limited to v <= sqrt(2 * a * d) as we approach the stop,
+        # which corresponds to a roughly constant deceleration "a" (in m/s^2).
+        self.gaze_stop_deceleration = 1.2
         
         # Pre-brake zone for zigzag mode (slow down before stop to reduce momentum)
         self.zigzag_prebrake_distance = 1.5  # Start slowing 1.5m before stop
@@ -443,6 +451,19 @@ class ExperimentalController:
             # Scale whatever the current target is (braking takes priority)
             target_v = min(target_v, self.base_speed * (dist_left / self.braking_distance))
 
+        # --- GAZE STOP BRAKING: reach 8m consistently across speeds ---
+        if (
+            self.gaze_type in {"stop_gaze_forward", "stop_rotate_gaze"}
+            and not self.gaze_behavior_completed
+            and self.gaze_state == "moving"
+        ):
+            dist_to_stop = self.gaze_stop_position - distance_traveled
+            if dist_to_stop > 0.0:
+                speed_cap = math.sqrt(max(0.0, 2.0 * self.gaze_stop_deceleration * dist_to_stop))
+                if speed_cap < target_v:
+                    target_v = speed_cap
+                    msg = f"Braking to Stop ({dist_to_stop:.2f}m)"
+
         # --- ZIGZAG PRE-BRAKE: Slow down before gaze stop to reduce momentum ---
         # This makes zigzag behave like forward mode for consistent rotation
         if (self.path_type == 'forward_zigzag' and 
@@ -558,6 +579,7 @@ def main():
         is_walking = False
         pending_start = False
         initial_pos = None
+        initial_yaw = None
         status = "READY"
         
         with Live(layout, refresh_per_second=10, screen=True) as live:
@@ -570,6 +592,7 @@ def main():
                     robot.stop()
                     is_walking = False
                     initial_pos = None
+                    initial_yaw = None
                     if not (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.pose_received):
                         robot.position = [0.0, 0.0, 0.35]
                     if not (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.yaw_received):
@@ -594,6 +617,7 @@ def main():
                             is_walking = True
                             if initial_pos is None:
                                 initial_pos = robot.position.copy()
+                                initial_yaw = float(robot.yaw)
                                 controller.reset_state()
                                 status = "STARTED"
                             else:
@@ -604,6 +628,7 @@ def main():
                     is_walking = True
                     if initial_pos is None:
                         initial_pos = robot.position.copy()
+                        initial_yaw = float(robot.yaw)
                         controller.reset_state()
                         status = "STARTED"
                     else:
@@ -613,7 +638,11 @@ def main():
                 vx, vy, omega = 0.0, 0.0, 0.0
                 
                 if is_walking and initial_pos:
-                    dist = robot.position[0] - initial_pos[0]
+                    if initial_yaw is None:
+                        initial_yaw = float(robot.yaw)
+                    dx = robot.position[0] - initial_pos[0]
+                    dy = robot.position[1] - initial_pos[1]
+                    dist = dx * math.cos(initial_yaw) + dy * math.sin(initial_yaw)
                     vx, vy, omega, complete, msg = controller.get_velocity_commands(
                         dist, current_time, robot.yaw, robot.get_measured_yaw_rate()
                     )
@@ -622,6 +651,7 @@ def main():
                         robot.stop()
                         is_walking = False
                         initial_pos = None
+                        initial_yaw = None
                         status = "COMPLETE"
                     else:
                         robot.set_velocity(vx, vy, omega)
