@@ -1,3 +1,10 @@
+# Prerequisites:
+
+1. Power on the robot dog
+2. Ensure the ethernet cable is connected to the robot dog and the laptop
+3. Run ssh unitree@192.168.123.18 in the terminal
+4. Run one of the commands below
+
 # All Commands to test (3x2x4)
 
 # 0.75m/s:
