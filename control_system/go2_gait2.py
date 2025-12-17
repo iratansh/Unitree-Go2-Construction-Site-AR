@@ -221,7 +221,7 @@ class ExperimentalController:
         self.braking_distance = 2.5
         
         self.gaze_stop_position = 8.0
-        self.gaze_stop_duration = 2.0
+        self.gaze_stop_duration = 4.0
         self.gaze_rotate_pause = 4.0
         # Braking profile used to reach the stop marker consistently across speeds.
         # The commanded speed is limited to v <= sqrt(2 * a * d) as we approach the stop,
