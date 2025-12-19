@@ -211,16 +211,18 @@ class Go2EthernetControl:
 
 
 class ExperimentalController:
-    def __init__(self, speed, path_type, gaze_type):
+    def __init__(self, speed, path_type, gaze_type, participant_side="right"):
         self.base_speed = speed # Store original speed request
         self.target_speed = speed
         self.path_type = path_type
         self.gaze_type = gaze_type
         
-        self.path_length = 16.0
+        self.path_length = 14.0
         self.braking_distance = 2.5
+
+        self.halfway_distance = self.path_length / 2.0
         
-        self.gaze_stop_position = 8.0
+        self.gaze_stop_position = self.halfway_distance
         self.gaze_stop_duration = 4.0
         self.gaze_rotate_pause = 4.0
         # Braking profile used to reach the stop marker consistently across speeds.
@@ -232,10 +234,23 @@ class ExperimentalController:
         self.zigzag_prebrake_distance = 1.5  # Start slowing 1.5m before stop
         self.zigzag_prebrake_speed = 0.3     # Slow to this speed before stopping
         
-        self.zigzag_start = 5.0
-        self.zigzag_end = 11.0
-        self.zigzag_cycles = 2.0
-        self.zigzag_lateral_fraction = 0.5
+        self.zigzag_start = 4.0
+        # Total zigzag window length (meters along the forward path).
+        self.zigzag_distance = 7.0
+        self.zigzag_end = self.zigzag_start + self.zigzag_distance
+        # Maximum lateral deviation from the original path while zigzagging.
+        self.zigzag_max_lateral = 2.0
+        # Fixed, asymmetric pattern expressed in "steps".
+        self.zigzag_step_pattern = [-3, 8, -7, 2]
+        # Lateral control tuning (vy is also clipped in set_velocity()).
+        self.zigzag_max_vy = 0.45
+        self.zigzag_lateral_kp = 1.2
+        self.zigzag_recenter_kp = 0.6
+        self.zigzag_recenter_deadband = 0.05
+        # Participant position relative to the original path at the halfway point.
+        # Used to ensure the zigzag direction at halfway is away from the participant.
+        self.participant_side = participant_side  # {"left","right","none"}
+        self._zigzag_profile = self._build_zigzag_profile()
         
         self.gaze_behavior_completed = False
         self.gaze_state = 'moving'
@@ -257,6 +272,93 @@ class ExperimentalController:
         self.gaze_rotate_angle = math.pi / 2.0
         
         self.heading_correction_gain = 1.5  
+
+    def _build_zigzag_profile(self):
+        """Build a piecewise-linear lateral-offset profile over the zigzag window."""
+        pattern = [int(s) for s in self.zigzag_step_pattern if int(s) != 0]
+        if not pattern:
+            return [(self.zigzag_start, 0.0), (self.zigzag_end, 0.0)]
+
+        net_steps = sum(pattern)
+        if net_steps != 0:
+            pattern.append(-net_steps)
+
+        cumulative_steps = [0]
+        running = 0
+        for delta in pattern:
+            running += int(delta)
+            cumulative_steps.append(running)
+
+        max_abs_steps = max(abs(v) for v in cumulative_steps) or 1
+        total_abs_steps = sum(abs(int(v)) for v in pattern) or 1
+
+        meters_along_path_per_step = float(self.zigzag_distance) / float(total_abs_steps)
+        meters_per_step_by_offset = (float(self.zigzag_max_lateral) * 0.95) / float(max_abs_steps)
+        meters_per_step_by_vy = (
+            meters_along_path_per_step
+            * (float(self.zigzag_max_vy) * 0.95)
+            / max(1e-6, float(self.base_speed))
+        )
+        meters_per_step = min(meters_per_step_by_offset, meters_per_step_by_vy)
+
+        offsets = [float(v) * meters_per_step for v in cumulative_steps]
+        offsets = [
+            float(np.clip(v, -float(self.zigzag_max_lateral), float(self.zigzag_max_lateral))) for v in offsets
+        ]
+
+        distances = [float(self.zigzag_start)]
+        s = float(self.zigzag_start)
+        for delta in pattern:
+            s += abs(float(delta)) * meters_along_path_per_step
+            distances.append(float(s))
+        distances[-1] = float(self.zigzag_end)
+
+        profile = list(zip(distances, offsets))
+
+        # Ensure that at the halfway point the zigzag is moving away from the participant.
+        # Convention: positive lateral is "left" of the original path.
+        if (
+            self.participant_side in {"left", "right"}
+            and float(self.zigzag_start) < float(self.halfway_distance) < float(self.zigzag_end)
+        ):
+            desired_slope_sign = 1.0 if self.participant_side == "right" else -1.0
+            dy_ds_half = 0.0
+            for idx in range(len(profile) - 1):
+                s0, y0 = profile[idx]
+                s1, y1 = profile[idx + 1]
+                if s0 <= float(self.halfway_distance) < s1:
+                    ds = float(s1 - s0)
+                    dy_ds_half = float((y1 - y0) / ds) if ds > 1e-9 else 0.0
+                    break
+
+            if dy_ds_half != 0.0:
+                sign_mult = desired_slope_sign * (1.0 if dy_ds_half > 0.0 else -1.0)
+            else:
+                sign_mult = desired_slope_sign
+
+            if sign_mult != 1.0:
+                profile = [(float(s), float(y) * sign_mult) for s, y in profile]
+
+        return profile
+
+    def _desired_zigzag_lateral(self, distance_traveled):
+        """Return (y_des, dy/ds) for the current zigzag segment."""
+        if distance_traveled <= self.zigzag_start or distance_traveled >= self.zigzag_end:
+            return 0.0, 0.0
+
+        profile = self._zigzag_profile or [(self.zigzag_start, 0.0), (self.zigzag_end, 0.0)]
+        for idx in range(len(profile) - 1):
+            s0, y0 = profile[idx]
+            s1, y1 = profile[idx + 1]
+            if s0 <= distance_traveled < s1:
+                ds = float(s1 - s0)
+                if ds <= 1e-9:
+                    return float(y1), 0.0
+                t = float((distance_traveled - s0) / ds)
+                y_des = float(y0 + t * (y1 - y0))
+                slope = float((y1 - y0) / ds)
+                return y_des, slope
+        return float(profile[-1][1]), 0.0
 
     def reset_state(self):
         self.last_speed = 0.0
@@ -315,7 +417,7 @@ class ExperimentalController:
         
         return omega, False
 
-    def get_velocity_commands(self, distance_traveled, current_time, robot_yaw, robot_yaw_rate=0.0):
+    def get_velocity_commands(self, distance_traveled, lateral_offset, current_time, robot_yaw, robot_yaw_rate=0.0):
         msg = "Moving"
         
         # Capture initial heading for basic path correction
@@ -451,7 +553,7 @@ class ExperimentalController:
             # Scale whatever the current target is (braking takes priority)
             target_v = min(target_v, self.base_speed * (dist_left / self.braking_distance))
 
-        # --- GAZE STOP BRAKING: reach 8m consistently across speeds ---
+        # --- GAZE STOP BRAKING: reach stop marker consistently across speeds ---
         if (
             self.gaze_type in {"stop_gaze_forward", "stop_rotate_gaze"}
             and not self.gaze_behavior_completed
@@ -483,15 +585,37 @@ class ExperimentalController:
         # 4. Path Vector Generation
         if not override_motion:
             if self.path_type == 'forward_zigzag' and self.zigzag_start <= distance_traveled < self.zigzag_end:
-                prog = (distance_traveled - self.zigzag_start) / (self.zigzag_end - self.zigzag_start)
-                vy = self.last_speed * self.zigzag_lateral_fraction * math.sin(2 * math.pi * self.zigzag_cycles * prog)
-                vx = math.sqrt(max(0, self.last_speed**2 - vy**2))
+                y_des, dy_ds = self._desired_zigzag_lateral(distance_traveled)
+                vy_ff = dy_ds * self.last_speed
+                vy = vy_ff + self.zigzag_lateral_kp * (y_des - float(lateral_offset))
+
+                max_vy = min(float(self.zigzag_max_vy), float(self.last_speed))
+                vy = float(np.clip(vy, -max_vy, max_vy))
+
+                if abs(float(lateral_offset)) > float(self.zigzag_max_lateral):
+                    vy = -math.copysign(max_vy, float(lateral_offset))
+
+                vx = math.sqrt(max(0.0, self.last_speed**2 - vy**2))
+                msg = f"Zigzag (lat: {lateral_offset:+.2f}m → {y_des:+.2f}m)"
                 
                 # Heading Correction (Stronger now)
                 if self.original_yaw is not None:
                     yaw_error = self._normalize_angle(self.original_yaw - robot_yaw)
                     omega = self.heading_correction_gain * yaw_error
                     omega = np.clip(omega, -0.6, 0.6) 
+            elif self.path_type == 'forward_zigzag' and distance_traveled >= self.zigzag_end:
+                # After the zigzag window, gently re-center on the original trajectory if needed.
+                vx = self.last_speed
+                vy = 0.0
+                if abs(float(lateral_offset)) > self.zigzag_recenter_deadband:
+                    vy = float(np.clip(-self.zigzag_recenter_kp * float(lateral_offset), -0.2, 0.2))
+                    vx = math.sqrt(max(0.0, self.last_speed**2 - vy**2))
+                    msg = f"Re-centering (lat: {lateral_offset:+.2f}m)"
+                if self.gaze_behavior_completed and self.original_yaw is not None:
+                    yaw_error = self._normalize_angle(self.original_yaw - robot_yaw)
+                    if abs(yaw_error) > self.yaw_tolerance:
+                        omega = self.heading_correction_gain * yaw_error
+                        omega = np.clip(omega, -0.6, 0.6)
             else:
                 # Linear motion
                 vx = self.last_speed
@@ -551,22 +675,34 @@ def main():
     parser.add_argument('--speed', type=float, default=0.75)
     parser.add_argument('--path', type=str, default='linear_forward')
     parser.add_argument('--gaze', type=str, default='no_stop')
+    parser.add_argument(
+        '--participant-side',
+        type=str,
+        default='right',
+        choices=['left', 'right', 'none'],
+        help=(
+            "Which side of the path the participant stands on at the halfway point, defined in the robot travel frame "
+            "(looking from start→end / increasing distance). Used to bias zigzag direction away at 7m. "
+            "If you're standing at halfway facing the approaching robot, your left/right are mirrored."
+        ),
+    )
     args = parser.parse_args()
 
     robot = Go2EthernetControl(args.interface)
-    controller = ExperimentalController(args.speed, args.path, args.gaze)
+    controller = ExperimentalController(args.speed, args.path, args.gaze, args.participant_side)
     kb = KeyboardInput()
     
     console = Console()
     layout = Layout()
     layout.split(Layout(name="main"), Layout(name="footer", size=3))
 
-    def update_ui(status, dist, speed, yaw, is_walking):
+    def update_ui(status, dist, lateral, speed, yaw, is_walking):
         table = Table(box=box.ROUNDED)
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="green")
         table.add_row("Status", f"[bold {'green' if is_walking else 'red'}]{status}[/]")
         table.add_row("Distance", f"{dist:.2f} m")
+        table.add_row("Lateral", f"{lateral:+.2f} m")
         table.add_row("Speed", f"{speed:.2f} m/s")
         table.add_row("Yaw", f"{math.degrees(yaw):.1f}°")
         layout["main"].update(Panel(table, title=f"Go2W: {args.gaze}"))
@@ -635,6 +771,7 @@ def main():
                         status = "RESUMED"
 
                 dist = 0.0
+                lateral = 0.0
                 vx, vy, omega = 0.0, 0.0, 0.0
                 
                 if is_walking and initial_pos:
@@ -643,8 +780,9 @@ def main():
                     dx = robot.position[0] - initial_pos[0]
                     dy = robot.position[1] - initial_pos[1]
                     dist = dx * math.cos(initial_yaw) + dy * math.sin(initial_yaw)
+                    lateral = -dx * math.sin(initial_yaw) + dy * math.cos(initial_yaw)
                     vx, vy, omega, complete, msg = controller.get_velocity_commands(
-                        dist, current_time, robot.yaw, robot.get_measured_yaw_rate()
+                        dist, lateral, current_time, robot.yaw, robot.get_measured_yaw_rate()
                     )
                     status = msg
                     if complete:
@@ -659,7 +797,7 @@ def main():
                     robot.stop()
 
                 speed_val = robot.get_measured_speed()
-                live.update(update_ui(status, dist, speed_val, robot.yaw, is_walking))
+                live.update(update_ui(status, dist, lateral, speed_val, robot.yaw, is_walking))
                 time.sleep(0.02)
 
     except Exception as e:
