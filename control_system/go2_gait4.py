@@ -918,6 +918,35 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('interface', type=str)
     parser.add_argument('--speed', type=float, default=0.75)
+    parser.add_argument(
+        '--speed-scale',
+        type=float,
+        default=1.0,
+        help="Scale factor applied to commanded linear speeds (use >1.0 if Go2W runs slow).",
+    )
+    parser.add_argument(
+        '--speed-feedback',
+        action='store_true',
+        help="Enable speed feedback using measured speed to better track the target.",
+    )
+    parser.add_argument(
+        '--speed-kp',
+        type=float,
+        default=0.7,
+        help="Proportional gain for speed feedback (only when --speed-feedback is set).",
+    )
+    parser.add_argument(
+        '--speed-min-scale',
+        type=float,
+        default=0.6,
+        help="Minimum feedback scaling applied to commanded speed.",
+    )
+    parser.add_argument(
+        '--speed-max-scale',
+        type=float,
+        default=1.8,
+        help="Maximum feedback scaling applied to commanded speed.",
+    )
     parser.add_argument('--path', type=str, default='linear_forward')
     parser.add_argument('--gaze', type=str, default='no_stop')
     parser.add_argument(
@@ -1072,6 +1101,7 @@ def main():
             while True:
                 current_time = time.time()
                 key = kb.get_key()
+                measured_speed = robot.get_measured_speed()
                 
                 if key == 'ESC': break
                 elif key == 'R':
@@ -1306,13 +1336,23 @@ def main():
                         lateral_estimate = 0.0
                         status = "COMPLETE"
                     else:
+                        linear_scale = float(args.speed_scale)
+                        if args.speed_feedback:
+                            cmd_speed = float(math.hypot(vx, vy))
+                            if cmd_speed > 0.1 and measured_speed > 0.05:
+                                ratio = float(cmd_speed / max(measured_speed, 0.1))
+                                feedback = 1.0 + float(args.speed_kp) * (ratio - 1.0)
+                                feedback = float(np.clip(feedback, float(args.speed_min_scale), float(args.speed_max_scale)))
+                                linear_scale *= feedback
+                        if linear_scale != 1.0:
+                            vx *= linear_scale
+                            vy *= linear_scale
                         robot.set_velocity(vx, vy, omega)
                 else:
                     robot.stop()
                     progress_time = None
 
-                speed_val = robot.get_measured_speed()
-                live.update(update_ui(status, dist_display, lateral_display, speed_val, robot.yaw, is_walking, distance_source, distance_scale))
+                live.update(update_ui(status, dist_display, lateral_display, measured_speed, robot.yaw, is_walking, distance_source, distance_scale))
                 time.sleep(0.02)
 
     except Exception as e:
