@@ -506,7 +506,12 @@ class ExperimentalController:
         self.rotation_settling_time = 1.0 
         self.settling_start_time = None  
         self.achieved_gaze_yaw = None  # Actual yaw after first rotation (for symmetric return)
-        self.gaze_rotate_angle = math.pi / 2.0
+        # Rotate toward the participant side during the stop-rotate gaze.
+        # Positive yaw is left (CCW), negative is right (CW).
+        if self.participant_side == "right":
+            self.gaze_rotate_angle = -math.pi / 2.0
+        else:
+            self.gaze_rotate_angle = math.pi / 2.0
         
         self.heading_correction_gain = 1.5  
 
@@ -1051,7 +1056,6 @@ def main():
         table.add_row("Status", f"[bold {'green' if is_walking else 'red'}]{status}[/]")
         table.add_row("Distance", f"{dist:.2f} m")
         table.add_row("Lateral", f"{lateral:+.2f} m")
-        table.add_row("Speed", f"{speed:.2f} m/s")
         table.add_row("Yaw", f"{math.degrees(yaw):.1f}°")
         table.add_row("Dist Src", str(dist_source))
         table.add_row("Dist Scale", f"{dist_scale:.3f}")
@@ -1059,15 +1063,9 @@ def main():
             "Odom",
             f"state:{int(_STATE_AVAILABLE)} pose:{int(robot.pose_received)} vel:{int(robot.velocity_received)} wheel:{int(robot.wheel_odom_received)}",
         )
-        if robot.wheel_odom_received:
-            table.add_row("Wheel v", f"{robot.wheel_speed_mps:.2f} m/s")
-        if robot._motor_state_count is not None:
-            table.add_row("Motor N", str(int(robot._motor_state_count)))
         wheel_idx = robot._wheel_motor_indices_user if robot._wheel_motor_indices_user is not None else robot._wheel_motor_indices
         if wheel_idx is not None:
             table.add_row("Wheel idx", ",".join(str(int(i)) for i in wheel_idx))
-            if len(wheel_idx) == 4 and (max(wheel_idx) - min(wheel_idx)) <= 3:
-                table.add_row("Wheel WARN", "idx clustered; try --wheel-motor-indices 3,7,11,15")
         if robot._wheel_detect_mode is not None:
             table.add_row("Wheel mode", str(robot._wheel_detect_mode))
         if robot._wheel_signs is not None:
