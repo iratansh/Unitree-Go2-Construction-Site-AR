@@ -120,6 +120,8 @@ class Go2EthernetControl:
         self._wheel_sign_scores = None
         self._wheel_signs = None
         self._wheel_sign_learn_samples = 0
+        self._motor_state_count = None
+        self._wheel_detect_mode = None
         self._state_lock = threading.Lock()
         self._sport_state_subscriber = None
         self._low_state_subscriber = None
@@ -213,6 +215,22 @@ class Go2EthernetControl:
                     dq_values.append(float(dq) if dq is not None else 0.0)
 
                 if len(dq_values) >= 4:
+                    motor_count = int(len(dq_values))
+                    self._motor_state_count = motor_count
+
+                    # If motor ordering matches the Go2W URDF, the wheel joints are the 4th joint in each leg group:
+                    # - 16 motors: [3, 7, 11, 15]
+                    # - 17 motors with a dummy/blank at index 0: [4, 8, 12, 16]
+                    # Users can override with --wheel-motor-indices.
+                    if self._wheel_motor_indices_user is not None:
+                        self._wheel_detect_mode = "user"
+                    elif motor_count == 16:
+                        self._wheel_motor_indices = [3, 7, 11, 15]
+                        self._wheel_detect_mode = "fixed16"
+                    elif motor_count == 17:
+                        self._wheel_motor_indices = [4, 8, 12, 16]
+                        self._wheel_detect_mode = "fixed17"
+
                     abs_dq = np.abs(np.asarray(dq_values, dtype=float))
                     top4 = np.argpartition(abs_dq, -4)[-4:]
                     top4_candidate = tuple(sorted(int(i) for i in top4))
@@ -249,8 +267,22 @@ class Go2EthernetControl:
                         candidate = top4_candidate
                         mean_abs = float(mean_abs_top4)
 
-                    cmd_mag = float(abs(self.current_vx) + abs(self.current_vy) + abs(self.current_omega))
-                    if cmd_mag > 0.05 and mean_abs >= float(WHEEL_ODOM_MIN_MEAN_ABS_DQ):
+                    cmd_vx = float(self.current_vx)
+                    cmd_vy = float(self.current_vy)
+                    cmd_omega = float(self.current_omega)
+                    learn_motion_ok = (
+                        abs(cmd_vx) >= float(WHEEL_SIGN_LEARN_CMD_VX_MIN)
+                        and abs(cmd_vy) <= float(WHEEL_SIGN_LEARN_CMD_VY_MAX)
+                        and abs(cmd_omega) <= float(WHEEL_SIGN_LEARN_CMD_OMEGA_MAX)
+                    )
+                    # Only lock auto-detected indices during mostly-straight forward motion
+                    # to avoid accidentally locking onto leg joints during postural adjustments.
+                    if (
+                        self._wheel_motor_indices_user is None
+                        and self._wheel_motor_indices is None
+                        and learn_motion_ok
+                        and mean_abs >= float(WHEEL_ODOM_MIN_MEAN_ABS_DQ)
+                    ):
                         if self._wheel_indices_candidate == candidate:
                             self._wheel_indices_candidate_hits += 1
                         else:
@@ -259,6 +291,7 @@ class Go2EthernetControl:
 
                         if self._wheel_motor_indices is None and self._wheel_indices_candidate_hits >= int(WHEEL_ODOM_STABLE_SAMPLES):
                             self._wheel_motor_indices = list(candidate)
+                            self._wheel_detect_mode = "auto"
 
                     wheel_locked = False
                     wheel_indices = None
@@ -393,15 +426,15 @@ class Go2EthernetControl:
 
 
 class ExperimentalController:
-    def __init__(self, speed, path_type, gaze_type, participant_side="right", path_length=10.0):
+    def __init__(self, speed, path_type, gaze_type, participant_side="right", path_length=14.0):
         self.base_speed = speed # Store original speed request
         self.target_speed = speed
         self.path_type = path_type
         self.gaze_type = gaze_type
         
         self.path_length = float(path_length)
-        # Keep the original go2_gait3 geometry (built for a 14m path) proportional when using a
-        # shorter logical path length (default 10m) to compensate for distance under-estimation.
+        # Keep the original go2_gait3 geometry (built for a 14m path) proportional when using
+        # a different logical path length.
         base_path_length = 14.0
         path_scale = float(self.path_length / base_path_length) if base_path_length > 1e-9 else 1.0
 
@@ -890,7 +923,7 @@ def main():
     parser.add_argument(
         '--path-length',
         type=float,
-        default=10.0,
+        default=14.0,
         help="Path length in meters (forward-progress distance used for completion).",
     )
     parser.add_argument(
@@ -909,7 +942,8 @@ def main():
         choices=['auto', 'state_pos', 'state_vel', 'wheel_odom', 'cmd_int'],
         help=(
             "Which signal to use for distance estimation. "
-            "'auto' prefers STATE_POS → STATE_VEL → WHEEL_ODOM → CMD_INT."
+            "'auto' prefers WHEEL_ODOM (Go2W wheels) for forward distance, uses STATE_POS for lateral when available, "
+            "then falls back to STATE_POS/STATE_VEL/CMD_INT."
         ),
     )
     parser.add_argument(
@@ -998,9 +1032,15 @@ def main():
         )
         if robot.wheel_odom_received:
             table.add_row("Wheel v", f"{robot.wheel_speed_mps:.2f} m/s")
+        if robot._motor_state_count is not None:
+            table.add_row("Motor N", str(int(robot._motor_state_count)))
         wheel_idx = robot._wheel_motor_indices_user if robot._wheel_motor_indices_user is not None else robot._wheel_motor_indices
         if wheel_idx is not None:
             table.add_row("Wheel idx", ",".join(str(int(i)) for i in wheel_idx))
+            if len(wheel_idx) == 4 and (max(wheel_idx) - min(wheel_idx)) <= 3:
+                table.add_row("Wheel WARN", "idx clustered; try --wheel-motor-indices 3,7,11,15")
+        if robot._wheel_detect_mode is not None:
+            table.add_row("Wheel mode", str(robot._wheel_detect_mode))
         if robot._wheel_signs is not None:
             table.add_row("Wheel sign", ",".join("+" if float(s) >= 0.0 else "-" for s in robot._wheel_signs))
         table.add_row(
@@ -1126,7 +1166,7 @@ def main():
                     dt = float(np.clip(dt, 0.0, 0.1))
                     progress_time = current_time
 
-                    # Prefer true odometry (state position). Otherwise integrate state velocity
+                    # Prefer wheel odometry on Go2W for forward distance, then state pose/velocity
                     # (or commanded velocity as a last resort) in the path frame.
                     use_mode = str(args.distance_source)
                     allow_pos = use_mode in {"auto", "state_pos"}
@@ -1134,7 +1174,64 @@ def main():
                     allow_wheel = use_mode in {"auto", "wheel_odom"}
                     allow_cmd = use_mode in {"auto", "cmd_int"}
 
-                    if allow_pos and (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.pose_received):
+                    state_pos_ready = allow_pos and (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.pose_received)
+                    state_vel_ready = allow_vel and (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.velocity_received)
+                    wheel_odom_ready = allow_wheel and (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.wheel_odom_received)
+                    wheel_odom_ok = wheel_odom_ready and (
+                        robot._wheel_motor_indices_user is not None
+                        or robot._wheel_motor_indices is not None
+                        or (robot._motor_state_count is not None and robot._motor_state_count >= 16)
+                    )
+                    prefer_wheel = (use_mode == "wheel_odom") or (use_mode == "auto" and wheel_odom_ok)
+
+                    if prefer_wheel:
+                        yaw = float(robot.yaw)
+                        cmd_vx_body = float(robot.current_vx)
+                        cmd_vy_body = float(robot.current_vy)
+                        cmd_speed = float(math.hypot(cmd_vx_body, cmd_vy_body))
+
+                        wheel_speed = float(abs(robot.wheel_speed_mps)) if wheel_odom_ready else 0.0
+                        # Track the last commanded forward direction so odometry still works while braking/coasting.
+                        if abs(cmd_vx_body) > 0.05:
+                            last_forward_sign = 1.0 if cmd_vx_body >= 0.0 else -1.0
+
+                        # Basic sanity checks: if we command motion but wheel speed is ~0, fall back to CMD_INT.
+                        odom_valid = bool(wheel_odom_ready)
+                        if odom_valid:
+                            if cmd_speed > 0.2 and wheel_speed < 0.03:
+                                odom_valid = False
+                            if wheel_speed > 6.0:
+                                odom_valid = False
+
+                        if odom_valid:
+                            vx_body = last_forward_sign * wheel_speed
+                            vy_body = cmd_vy_body
+                            distance_source_base = "WHEEL_ODOM"
+                        else:
+                            vx_body = cmd_vx_body
+                            vy_body = cmd_vy_body
+                            distance_source_base = "CMD_INT"
+
+                        vx_world = vx_body * math.cos(yaw) - vy_body * math.sin(yaw)
+                        vy_world = vx_body * math.sin(yaw) + vy_body * math.cos(yaw)
+
+                        v_along = vx_world * math.cos(initial_yaw) + vy_world * math.sin(initial_yaw)
+                        v_lateral = -vx_world * math.sin(initial_yaw) + vy_world * math.cos(initial_yaw)
+
+                        distance_along_path = float(max(0.0, distance_along_path + v_along * dt))
+                        dist = distance_along_path
+
+                        if use_mode == "auto" and state_pos_ready:
+                            dx = robot.position[0] - initial_pos[0]
+                            dy = robot.position[1] - initial_pos[1]
+                            lateral = -dx * math.sin(initial_yaw) + dy * math.cos(initial_yaw)
+                            lateral_estimate = float(lateral)
+                            distance_source = f"{distance_source_base}+STATE_POS"
+                        else:
+                            lateral_estimate = float(lateral_estimate + v_lateral * dt)
+                            lateral = lateral_estimate
+                            distance_source = distance_source_base
+                    elif state_pos_ready:
                         dx = robot.position[0] - initial_pos[0]
                         dy = robot.position[1] - initial_pos[1]
                         dist = dx * math.cos(initial_yaw) + dy * math.sin(initial_yaw)
@@ -1144,7 +1241,7 @@ def main():
                         distance_source = "STATE_POS"
                     else:
                         yaw = float(robot.yaw)
-                        if allow_vel and (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.velocity_received):
+                        if state_vel_ready:
                             # Unitree SDKs have historically reported velocity in either the body frame or
                             # a fixed/world frame depending on the message type/version. Use a simple
                             # alignment heuristic against the commanded motion to pick the better match.
@@ -1171,37 +1268,6 @@ def main():
                             else:
                                 vx_world, vy_world = vx_world_b, vy_world_b
                                 distance_source = "STATE_VEL(B)"
-                        elif allow_wheel and (_SDK_AVAILABLE and _STATE_AVAILABLE and robot.wheel_odom_received):
-                            # If only LowState is available (no base pose/velocity), use wheel-derived
-                            # forward speed for distance. Keep lateral estimate driven by commanded vy.
-                            cmd_vx_body = float(robot.current_vx)
-                            cmd_vy_body = float(robot.current_vy)
-                            cmd_speed = float(math.hypot(cmd_vx_body, cmd_vy_body))
-
-                            wheel_speed = float(abs(robot.wheel_speed_mps))
-                            # Track the last commanded forward direction so odometry still works while braking/coasting.
-                            if abs(cmd_vx_body) > 0.05:
-                                last_forward_sign = 1.0 if cmd_vx_body >= 0.0 else -1.0
-
-                            # Basic sanity checks: if we command motion but wheel speed is ~0, fall back to CMD_INT.
-                            odom_valid = True
-                            if cmd_speed > 0.2 and wheel_speed < 0.03:
-                                odom_valid = False
-                            if wheel_speed > 6.0:
-                                odom_valid = False
-
-                            if odom_valid:
-                                vx_body = last_forward_sign * wheel_speed
-                                vy_body = cmd_vy_body
-                                vx_world = vx_body * math.cos(yaw) - vy_body * math.sin(yaw)
-                                vy_world = vx_body * math.sin(yaw) + vy_body * math.cos(yaw)
-                                distance_source = "WHEEL_ODOM"
-                            else:
-                                vx_body = cmd_vx_body
-                                vy_body = cmd_vy_body
-                                vx_world = vx_body * math.cos(yaw) - vy_body * math.sin(yaw)
-                                vy_world = vx_body * math.sin(yaw) + vy_body * math.cos(yaw)
-                                distance_source = "CMD_INT"
                         elif allow_cmd:
                             vx_body = float(robot.current_vx)
                             vy_body = float(robot.current_vy)
@@ -1238,7 +1304,6 @@ def main():
                         progress_time = None
                         distance_along_path = 0.0
                         lateral_estimate = 0.0
-                        distance_source = "N/A"
                         status = "COMPLETE"
                     else:
                         robot.set_velocity(vx, vy, omega)

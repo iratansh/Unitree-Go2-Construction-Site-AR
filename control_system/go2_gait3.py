@@ -120,6 +120,8 @@ class Go2EthernetControl:
         self._wheel_sign_scores = None
         self._wheel_signs = None
         self._wheel_sign_learn_samples = 0
+        self._motor_state_count = None
+        self._wheel_detect_mode = None
         self._state_lock = threading.Lock()
         self._sport_state_subscriber = None
         self._low_state_subscriber = None
@@ -213,6 +215,22 @@ class Go2EthernetControl:
                     dq_values.append(float(dq) if dq is not None else 0.0)
 
                 if len(dq_values) >= 4:
+                    motor_count = int(len(dq_values))
+                    self._motor_state_count = motor_count
+
+                    # If motor ordering matches the Go2W URDF, the wheel joints are the 4th joint in each leg group:
+                    # - 16 motors: [3, 7, 11, 15]
+                    # - 17 motors with a dummy/blank at index 0: [4, 8, 12, 16]
+                    # Users can override with --wheel-motor-indices.
+                    if self._wheel_motor_indices_user is not None:
+                        self._wheel_detect_mode = "user"
+                    elif motor_count == 16:
+                        self._wheel_motor_indices = [3, 7, 11, 15]
+                        self._wheel_detect_mode = "fixed16"
+                    elif motor_count == 17:
+                        self._wheel_motor_indices = [4, 8, 12, 16]
+                        self._wheel_detect_mode = "fixed17"
+
                     abs_dq = np.abs(np.asarray(dq_values, dtype=float))
                     top4 = np.argpartition(abs_dq, -4)[-4:]
                     top4_candidate = tuple(sorted(int(i) for i in top4))
@@ -249,8 +267,22 @@ class Go2EthernetControl:
                         candidate = top4_candidate
                         mean_abs = float(mean_abs_top4)
 
-                    cmd_mag = float(abs(self.current_vx) + abs(self.current_vy) + abs(self.current_omega))
-                    if cmd_mag > 0.05 and mean_abs >= float(WHEEL_ODOM_MIN_MEAN_ABS_DQ):
+                    cmd_vx = float(self.current_vx)
+                    cmd_vy = float(self.current_vy)
+                    cmd_omega = float(self.current_omega)
+                    learn_motion_ok = (
+                        abs(cmd_vx) >= float(WHEEL_SIGN_LEARN_CMD_VX_MIN)
+                        and abs(cmd_vy) <= float(WHEEL_SIGN_LEARN_CMD_VY_MAX)
+                        and abs(cmd_omega) <= float(WHEEL_SIGN_LEARN_CMD_OMEGA_MAX)
+                    )
+                    # Only lock auto-detected indices during mostly-straight forward motion
+                    # to avoid accidentally locking onto leg joints during postural adjustments.
+                    if (
+                        self._wheel_motor_indices_user is None
+                        and self._wheel_motor_indices is None
+                        and learn_motion_ok
+                        and mean_abs >= float(WHEEL_ODOM_MIN_MEAN_ABS_DQ)
+                    ):
                         if self._wheel_indices_candidate == candidate:
                             self._wheel_indices_candidate_hits += 1
                         else:
@@ -259,6 +291,7 @@ class Go2EthernetControl:
 
                         if self._wheel_motor_indices is None and self._wheel_indices_candidate_hits >= int(WHEEL_ODOM_STABLE_SAMPLES):
                             self._wheel_motor_indices = list(candidate)
+                            self._wheel_detect_mode = "auto"
 
                     wheel_locked = False
                     wheel_indices = None
@@ -993,9 +1026,15 @@ def main():
         )
         if robot.wheel_odom_received:
             table.add_row("Wheel v", f"{robot.wheel_speed_mps:.2f} m/s")
+        if robot._motor_state_count is not None:
+            table.add_row("Motor N", str(int(robot._motor_state_count)))
         wheel_idx = robot._wheel_motor_indices_user if robot._wheel_motor_indices_user is not None else robot._wheel_motor_indices
         if wheel_idx is not None:
             table.add_row("Wheel idx", ",".join(str(int(i)) for i in wheel_idx))
+            if len(wheel_idx) == 4 and (max(wheel_idx) - min(wheel_idx)) <= 3:
+                table.add_row("Wheel WARN", "idx clustered; try --wheel-motor-indices 3,7,11,15")
+        if robot._wheel_detect_mode is not None:
+            table.add_row("Wheel mode", str(robot._wheel_detect_mode))
         if robot._wheel_signs is not None:
             table.add_row("Wheel sign", ",".join("+" if float(s) >= 0.0 else "-" for s in robot._wheel_signs))
         table.add_row(
@@ -1233,7 +1272,6 @@ def main():
                         progress_time = None
                         distance_along_path = 0.0
                         lateral_estimate = 0.0
-                        distance_source = "N/A"
                         status = "COMPLETE"
                     else:
                         robot.set_velocity(vx, vy, omega)
