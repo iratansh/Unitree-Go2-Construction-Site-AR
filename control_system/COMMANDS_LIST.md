@@ -44,26 +44,26 @@ python3 go2_gait2.py eth0 --speed 1.25 --path forward_zigzag --gaze stop_rotate_
 
 # Linear path
 
-python3 go2_gait2.py eth0 --speed 1.75 --path linear_forward --gaze no_stop --speed-feedback
-python3 go2_gait2.py eth0 --speed 1.75 --path linear_forward --gaze stop_gaze_forward --speed-feedback
-python3 go2_gait2.py eth0 --speed 1.75 --path linear_forward --gaze stop_rotate_gaze --speed-feedback
+python3 go2_gait2.py eth0 --speed 1.75 --path linear_forward --gaze no_stop
+python3 go2_gait2.py eth0 --speed 1.75 --path linear_forward --gaze stop_gaze_forward
+python3 go2_gait2.py eth0 --speed 1.75 --path linear_forward --gaze stop_rotate_gaze
 
 # Zigzag path
 
-python3 go2_gait2.py eth0 --speed 1.75 --path forward_zigzag --gaze no_stop --participant-side right --speed-feedback
-python3 go2_gait2.py eth0 --speed 1.75 --path forward_zigzag --gaze stop_gaze_forward --participant-side right --speed-feedback
-python3 go2_gait2.py eth0 --speed 1.75 --path forward_zigzag --gaze stop_rotate_gaze --participant-side right --speed-feedback
+python3 go2_gait2.py eth0 --speed 1.75 --path forward_zigzag --gaze no_stop --participant-side right
+python3 go2_gait2.py eth0 --speed 1.75 --path forward_zigzag --gaze stop_gaze_forward --participant-side right
+python3 go2_gait2.py eth0 --speed 1.75 --path forward_zigzag --gaze stop_rotate_gaze --participant-side right
 
 # 2.25m/s:
 
 # Linear path
 
-python3 go2_gait2.py eth0 --speed 2.25 --path linear_forward --gaze no_stop --speed-feedback
-python3 go2_gait2.py eth0 --speed 2.25 --path linear_forward --gaze stop_gaze_forward --speed-feedback
-python3 go2_gait2.py eth0 --speed 2.25 --path linear_forward --gaze stop_rotate_gaze --speed-feedback
+python3 go2_gait2.py eth0 --speed 2.25 --path linear_forward --gaze no_stop
+python3 go2_gait2.py eth0 --speed 2.25 --path linear_forward --gaze stop_gaze_forward
+python3 go2_gait2.py eth0 --speed 2.25 --path linear_forward --gaze stop_rotate_gaze
 
 # Zigzag path
 
- python3 go2_gait2.py eth0 --speed 2.25 --path forward_zigzag --gaze no_stop --participant-side right --speed-feedback
-python3 go2_gait2.py eth0 --speed 2.25 --path forward_zigzag --gaze stop_gaze_forward --participant-side right --speed-feedback
-python3 go2_gait2.py eth0 --speed 2.25 --path forward_zigzag --gaze stop_rotate_gaze --participant-side right --speed-feedback
+ python3 go2_gait2.py eth0 --speed 2.25 --path forward_zigzag --gaze no_stop --participant-side right
+python3 go2_gait2.py eth0 --speed 2.25 --path forward_zigzag --gaze stop_gaze_forward --participant-side right
+python3 go2_gait2.py eth0 --speed 2.25 --path forward_zigzag --gaze stop_rotate_gaze --participant-side right
