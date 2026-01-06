@@ -3,6 +3,7 @@ This script enables Ethernet control of the Unitree Go2W robot to perform
 a predefined gait pattern with specific gaze behaviors. It includes advanced
 control logic to handle momentum during zigzag maneuvers and precise rotation
 commands to minimize overshoot and undershoot.
+Author: Ishaan Ratanshi
 """
 
 import sys
@@ -60,9 +61,6 @@ SPEED_OPTIONS = [0.75, 1.25, 1.75, 2.25]
 PATH_OPTIONS = ['linear_forward', 'forward_zigzag']
 GAZE_OPTIONS = ['no_stop', 'stop_gaze_forward', 'stop_rotate_gaze']
 
-# Wheel radius (meters) used for wheel odometry.
-# Derived from the Go2W URDF wheel mesh (control_system/URDF/go2w_description/dae/*wheel.dae),
-# where the outer radius is ~0.086m (diameter ~17.2cm).
 WHEEL_RADIUS_M = 0.086
 WHEEL_ODOM_MIN_MEAN_ABS_DQ = 0.5  # rad/s; ignore noise when nearly stopped
 WHEEL_ODOM_STABLE_SAMPLES = 10  # samples to lock wheel motor indices
@@ -218,10 +216,6 @@ class Go2EthernetControl:
                     motor_count = int(len(dq_values))
                     self._motor_state_count = motor_count
 
-                    # If motor ordering matches the Go2W URDF, the wheel joints are the 4th joint in each leg group:
-                    # - 16 motors: [3, 7, 11, 15]
-                    # - 17 motors with a dummy/blank at index 0: [4, 8, 12, 16]
-                    # Users can override with --wheel-motor-indices.
                     if self._wheel_motor_indices_user is not None:
                         self._wheel_detect_mode = "user"
                     elif motor_count == 16:
@@ -236,9 +230,6 @@ class Go2EthernetControl:
                     top4_candidate = tuple(sorted(int(i) for i in top4))
                     mean_abs_top4 = float(abs_dq[list(top4_candidate)].mean())
 
-                    # Prefer known Go2W wheel joint patterns when plausible:
-                    # - 16 joints with 0-based indexing: [3, 7, 11, 15]
-                    # - 17 joints with a dummy at index 0: [4, 8, 12, 16]
                     preferred_candidates = []
                     if len(dq_values) >= 16:
                         preferred_candidates.append((3, 7, 11, 15))
@@ -386,7 +377,6 @@ class Go2EthernetControl:
         cmd_vy = float(self.current_vy)
         cmd_omega = float(self.current_omega)
 
-        # Simulation / fallback integration (only integrate what we aren't receiving)
         now = time.time()
         if self._last_command_time is None:
             dt = 0.02
@@ -433,8 +423,6 @@ class ExperimentalController:
         self.gaze_type = gaze_type
         
         self.path_length = float(path_length)
-        # Keep the original go2_gait3 geometry (built for a 14m path) proportional when using
-        # a different logical path length.
         base_path_length = 14.0
         path_scale = float(self.path_length / base_path_length) if base_path_length > 1e-9 else 1.0
 
@@ -449,6 +437,13 @@ class ExperimentalController:
         # The commanded speed is limited to v <= sqrt(2 * a * d) as we approach the stop,
         # which corresponds to a roughly constant deceleration "a" (in m/s^2).
         self.gaze_stop_deceleration = 1.2
+        # Final approach speed cap near the stop marker to reduce overshoot at higher speeds.
+        self.gaze_stop_creep_distance = 0.4 * path_scale
+        self.gaze_stop_creep_speed = 0.2
+        # As we approach the stop marker in zigzag mode, blend toward the centerline
+        # and increase lateral correction so the robot reaches y=0 at 7m.
+        self.zigzag_stop_align_distance = 0.8 * path_scale
+        self.zigzag_stop_align_kp = 2.4
         
         # Pre-brake zone for zigzag mode (slow down before stop to reduce momentum)
         self.zigzag_prebrake_distance = 1.5 * path_scale  # Start slowing before stop (scaled)
@@ -461,10 +456,9 @@ class ExperimentalController:
         self.zigzag_end = self.zigzag_start + self.zigzag_distance
         # Maximum lateral deviation from the original path while zigzagging.
         self.zigzag_max_lateral = 2.0
-        # Fixed, asymmetric pattern expressed in "steps".
-        # Added one extra zigzag "motion" (one additional lateral segment) vs go2_gait2.
-        # Make the final oscillation a bit larger (and less "tiny") than the initial go2_gait3 draft.
-        self.zigzag_step_pattern = [-3, 8, -6, 3, -2]
+        # Fixed step pattern with two half-cycles so the midpoint lands on centerline
+        # (multiple zigzags before/after 7m while returning to y=0 at the midpoint).
+        self.zigzag_step_pattern = [-4, 6, -3, 1, -4, 6, -3, 1]
         # Lateral control tuning (vy is also clipped in set_velocity()).
         # Increase max lateral speed to make the zigzag motion more pronounced.
         self.zigzag_max_vy = 0.5
@@ -556,6 +550,7 @@ class ExperimentalController:
         distances[-1] = float(self.zigzag_end)
 
         profile = list(zip(distances, offsets))
+        profile = self._shape_zigzag_midpoint(profile, self.halfway_distance)
 
         # Ensure that at the halfway point the zigzag is moving away from the participant.
         # Convention: positive lateral is "left" of the original path.
@@ -582,6 +577,71 @@ class ExperimentalController:
                 profile = [(float(s), float(y) * sign_mult) for s, y in profile]
 
         return profile
+
+    def _anchor_zigzag_midpoint(self, profile, midpoint):
+        midpoint = float(midpoint)
+        if not (float(self.zigzag_start) < midpoint < float(self.zigzag_end)):
+            return profile
+
+        anchored = []
+        inserted = False
+        for idx in range(len(profile) - 1):
+            s0, y0 = profile[idx]
+            s1, _ = profile[idx + 1]
+            if abs(float(s0) - midpoint) < 1e-6:
+                y0 = 0.0
+                inserted = True
+            anchored.append((float(s0), float(y0)))
+            if float(s0) < midpoint < float(s1):
+                anchored.append((midpoint, 0.0))
+                inserted = True
+
+        s_last, y_last = profile[-1]
+        if abs(float(s_last) - midpoint) < 1e-6:
+            anchored.append((float(s_last), 0.0))
+            inserted = True
+        else:
+            anchored.append((float(s_last), float(y_last)))
+
+        if not inserted:
+            return profile
+
+        deduped = []
+        for s, y in anchored:
+            if deduped and abs(float(s) - float(deduped[-1][0])) < 1e-6:
+                deduped[-1] = (float(s), float(y))
+            else:
+                deduped.append((float(s), float(y)))
+        return deduped
+
+    def _shape_zigzag_midpoint(self, profile, midpoint):
+        """Ensure the zigzag passes through the midpoint and continues outward past it."""
+        midpoint = float(midpoint)
+        anchored = self._anchor_zigzag_midpoint(profile, midpoint)
+        mid_idx = None
+        for idx, (s, _) in enumerate(anchored):
+            if abs(float(s) - midpoint) < 1e-6:
+                mid_idx = idx
+                break
+        if mid_idx is None or mid_idx == 0 or mid_idx >= len(anchored) - 1:
+            return anchored
+
+        s0, y0 = anchored[mid_idx - 1]
+        s1, y1 = anchored[mid_idx]
+        s2, y2 = anchored[mid_idx + 1]
+        ds_before = float(s1 - s0)
+        ds_after = float(s2 - s1)
+        if ds_before <= 1e-9 or ds_after <= 1e-9:
+            return anchored
+
+        slope_before = float((y1 - y0) / ds_before)
+        slope_after = float((y2 - y1) / ds_after)
+        if abs(slope_before) < 1e-9 or abs(slope_after) < 1e-9:
+            return anchored
+
+        if slope_before * slope_after < 0.0:
+            anchored = [(float(s), -float(y)) if float(s) > midpoint else (float(s), float(y)) for s, y in anchored]
+        return anchored
 
     def _desired_zigzag_lateral(self, distance_traveled):
         """Return (y_des, dy/ds) for the current zigzag segment."""
@@ -614,6 +674,11 @@ class ExperimentalController:
         self.target_yaw = None
         self.settling_start_time = None
         self.achieved_gaze_yaw = None
+
+    def should_pause_distance(self):
+        if self.gaze_type != "stop_rotate_gaze":
+            return False
+        return self.gaze_state in {"stopped", "rotating_out", "paused", "rotating_in"}
 
     def _normalize_angle(self, angle):
         """Normalize angle to [-pi, pi]""" 
@@ -832,6 +897,17 @@ class ExperimentalController:
                 target_v = min(target_v, prebrake_target)
                 msg = f"Pre-braking ({dist_to_stop:.1f}m to stop)"
 
+        # --- STOP APPROACH CREEP: slow the last stretch to hit the 7m mark ---
+        if (
+            self.gaze_type in {"stop_gaze_forward", "stop_rotate_gaze"}
+            and not self.gaze_behavior_completed
+            and self.gaze_state == "moving"
+        ):
+            dist_to_stop = self.gaze_stop_position - distance_traveled
+            if 0.0 < dist_to_stop < self.gaze_stop_creep_distance:
+                target_v = min(target_v, self.gaze_stop_creep_speed)
+                msg = f"Approaching Stop ({dist_to_stop:.2f}m)"
+
         # High-level smoothing
         self.last_speed = self.speed_smoothing * self.last_speed + (1 - self.speed_smoothing) * target_v
         
@@ -839,7 +915,22 @@ class ExperimentalController:
         if not override_motion:
             if self.path_type == 'forward_zigzag' and self.zigzag_start <= distance_traveled < self.zigzag_end:
                 y_des, dy_ds = self._desired_zigzag_lateral(distance_traveled)
-                desired_slope = float(dy_ds) + float(self.zigzag_lateral_kp) * (float(y_des) - float(lateral_offset))
+                lateral_kp = float(self.zigzag_lateral_kp)
+                if (
+                    self.gaze_type in {"stop_gaze_forward", "stop_rotate_gaze"}
+                    and not self.gaze_behavior_completed
+                ):
+                    dist_to_stop = self.gaze_stop_position - distance_traveled
+                    if 0.0 < dist_to_stop < float(self.zigzag_stop_align_distance):
+                        align_frac = 1.0 - (dist_to_stop / float(self.zigzag_stop_align_distance))
+                        y_des = float(y_des) * (1.0 - align_frac)
+                        dy_ds = float(dy_ds) * (1.0 - align_frac)
+                        lateral_kp = float(
+                            self.zigzag_lateral_kp
+                            + align_frac * (self.zigzag_stop_align_kp - self.zigzag_lateral_kp)
+                        )
+                        msg = f"Aligning to Stop (lat: {lateral_offset:+.2f}m → {y_des:+.2f}m)"
+                desired_slope = float(dy_ds) + float(lateral_kp) * (float(y_des) - float(lateral_offset))
                 denom = math.hypot(1.0, desired_slope)
                 vx = float(self.last_speed) / denom if denom > 1e-9 else float(self.last_speed)
                 vy = desired_slope * vx
@@ -851,7 +942,8 @@ class ExperimentalController:
                     vy = -math.copysign(max_vy, float(lateral_offset))
 
                 vx = math.sqrt(max(0.0, self.last_speed**2 - vy**2))
-                msg = f"Zigzag (lat: {lateral_offset:+.2f}m → {y_des:+.2f}m)"
+                if msg == "Moving":
+                    msg = f"Zigzag (lat: {lateral_offset:+.2f}m → {y_des:+.2f}m)"
             elif self.path_type == 'forward_zigzag' and distance_traveled >= self.zigzag_end:
                 # After the zigzag window, gently re-center on the original trajectory if needed.
                 vx = self.last_speed
@@ -1210,9 +1302,16 @@ def main():
                         or robot._wheel_motor_indices is not None
                         or (robot._motor_state_count is not None and robot._motor_state_count >= 16)
                     )
+                    if use_mode == "auto":
+                        wheel_odom_ok = wheel_odom_ok and (robot._wheel_signs is not None)
                     prefer_wheel = (use_mode == "wheel_odom") or (use_mode == "auto" and wheel_odom_ok)
 
-                    if prefer_wheel:
+                    pause_distance = controller.should_pause_distance()
+                    if pause_distance:
+                        dist = distance_along_path
+                        lateral = lateral_estimate
+                        distance_source = "PAUSED"
+                    elif prefer_wheel:
                         yaw = float(robot.yaw)
                         cmd_vx_body = float(robot.current_vx)
                         cmd_vy_body = float(robot.current_vy)
@@ -1270,9 +1369,6 @@ def main():
                     else:
                         yaw = float(robot.yaw)
                         if state_vel_ready:
-                            # Unitree SDKs have historically reported velocity in either the body frame or
-                            # a fixed/world frame depending on the message type/version. Use a simple
-                            # alignment heuristic against the commanded motion to pick the better match.
                             vx0 = float(robot.measured_velocity[0])
                             vy0 = float(robot.measured_velocity[1])
 
